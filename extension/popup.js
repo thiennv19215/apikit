@@ -189,7 +189,7 @@ if (saveBtn) {
 
 if (cfBtn) {
   cfBtn.addEventListener('click', () => {
-    saveUrl('wss://api.shopcongngheso5.io.vn/ws');
+    saveUrl('wss://apikit.shopcongngheso5.io.vn/ws');
   });
 }
 

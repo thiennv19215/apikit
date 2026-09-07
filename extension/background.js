@@ -11,7 +11,7 @@
  * The bearer capture and `api_request` proxy below are the legacy path, kept
  * for USE_BATCH_RPC=0 and for an old pinned labs.google tab.
  */
-const DEFAULT_AGENT_WS_URL = 'wss://api.shopcongngheso5.io.vn/ws';
+const DEFAULT_AGENT_WS_URL = 'wss://apikit.shopcongngheso5.io.vn/ws';
 const LOCAL_AGENT_WS_URL = 'ws://127.0.0.1:9222';
 let agentWsUrl = DEFAULT_AGENT_WS_URL;
 // NOTE: This is a browser-restricted public API key — safe to ship in extension bundles.
