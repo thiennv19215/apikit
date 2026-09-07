@@ -29,30 +29,41 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Client API v1"])
 
 
-def _normalize_image_aspect(aspect: str) -> str:
+def _normalize_image_aspect(aspect: str | None) -> str:
+    raw = str(aspect or "").strip().upper()
     mapping = {
-        "16:9": "IMAGE_ASPECT_RATIO_LANDSCAPE",
-        "9:16": "IMAGE_ASPECT_RATIO_PORTRAIT",
-        "1:1": "IMAGE_ASPECT_RATIO_SQUARE",
-        "3:4": "IMAGE_ASPECT_RATIO_PORTRAIT_FOUR_THREE",
-        "4:3": "IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE",
         "IMAGE_ASPECT_RATIO_LANDSCAPE": "IMAGE_ASPECT_RATIO_LANDSCAPE",
         "IMAGE_ASPECT_RATIO_PORTRAIT": "IMAGE_ASPECT_RATIO_PORTRAIT",
         "IMAGE_ASPECT_RATIO_SQUARE": "IMAGE_ASPECT_RATIO_SQUARE",
         "IMAGE_ASPECT_RATIO_PORTRAIT_FOUR_THREE": "IMAGE_ASPECT_RATIO_PORTRAIT_FOUR_THREE",
         "IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE": "IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE",
+        "LANDSCAPE": "IMAGE_ASPECT_RATIO_LANDSCAPE",
+        "PORTRAIT": "IMAGE_ASPECT_RATIO_PORTRAIT",
+        "SQUARE": "IMAGE_ASPECT_RATIO_SQUARE",
+        "HORIZONTAL": "IMAGE_ASPECT_RATIO_LANDSCAPE",
+        "VERTICAL": "IMAGE_ASPECT_RATIO_PORTRAIT",
+        "16:9": "IMAGE_ASPECT_RATIO_LANDSCAPE",
+        "9:16": "IMAGE_ASPECT_RATIO_PORTRAIT",
+        "1:1": "IMAGE_ASPECT_RATIO_SQUARE",
+        "3:4": "IMAGE_ASPECT_RATIO_PORTRAIT_FOUR_THREE",
+        "4:3": "IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE",
     }
-    return mapping.get(str(aspect).strip(), "IMAGE_ASPECT_RATIO_PORTRAIT")
+    return mapping.get(raw, "IMAGE_ASPECT_RATIO_LANDSCAPE")
 
 
-def _normalize_video_aspect(aspect: str) -> str:
+def _normalize_video_aspect(aspect: str | None) -> str:
+    raw = str(aspect or "").strip().upper()
     mapping = {
-        "16:9": "VIDEO_ASPECT_RATIO_LANDSCAPE",
-        "9:16": "VIDEO_ASPECT_RATIO_PORTRAIT",
         "VIDEO_ASPECT_RATIO_LANDSCAPE": "VIDEO_ASPECT_RATIO_LANDSCAPE",
         "VIDEO_ASPECT_RATIO_PORTRAIT": "VIDEO_ASPECT_RATIO_PORTRAIT",
+        "LANDSCAPE": "VIDEO_ASPECT_RATIO_LANDSCAPE",
+        "PORTRAIT": "VIDEO_ASPECT_RATIO_PORTRAIT",
+        "HORIZONTAL": "VIDEO_ASPECT_RATIO_LANDSCAPE",
+        "VERTICAL": "VIDEO_ASPECT_RATIO_PORTRAIT",
+        "16:9": "VIDEO_ASPECT_RATIO_LANDSCAPE",
+        "9:16": "VIDEO_ASPECT_RATIO_PORTRAIT",
     }
-    return mapping.get(aspect, "VIDEO_ASPECT_RATIO_PORTRAIT")
+    return mapping.get(raw, "VIDEO_ASPECT_RATIO_LANDSCAPE")
 
 
 def _build_job_item(req: dict) -> Job:

@@ -30,7 +30,7 @@ class ImageUploadResponse(BaseModel):
 class ImageGenerationRequest(BaseModel):
     prompt: str
     input_images: list[InlineImageInput] | None = None
-    aspect_ratio: str = "9:16"
+    aspect_ratio: str = "IMAGE_ASPECT_RATIO_LANDSCAPE"
     model: str | None = "pro"
     count: int = 1
     variant_count: int = 1
@@ -51,7 +51,7 @@ class VideoGenerationRequest(BaseModel):
     prompt: str
     type: str = "image_to_video"
     input_images: list[InlineImageInput] = Field(default_factory=list)
-    aspect_ratio: str = "9:16"
+    aspect_ratio: str = "VIDEO_ASPECT_RATIO_LANDSCAPE"
     duration_seconds: int = 8
     model: str | None = "omni_flash"
     quality: str | None = None

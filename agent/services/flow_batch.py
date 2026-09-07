@@ -68,13 +68,17 @@ ASPECT_LANDSCAPE = 3        # 1376x768  (16:9)
 ASPECT_PORTRAIT_4_3 = 4     # 896x1200  (3:4)
 ASPECT_LANDSCAPE_4_3 = 5    # 1200x896  (4:3)
 
-#: The names the REST payload used, so callers can keep speaking them.
 ASPECT_BY_NAME = {
     "IMAGE_ASPECT_RATIO_SQUARE": ASPECT_SQUARE,
     "IMAGE_ASPECT_RATIO_PORTRAIT": ASPECT_PORTRAIT,
     "IMAGE_ASPECT_RATIO_LANDSCAPE": ASPECT_LANDSCAPE,
     "IMAGE_ASPECT_RATIO_PORTRAIT_FOUR_THREE": ASPECT_PORTRAIT_4_3,
     "IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE": ASPECT_LANDSCAPE_4_3,
+    "LANDSCAPE": ASPECT_LANDSCAPE,
+    "PORTRAIT": ASPECT_PORTRAIT,
+    "SQUARE": ASPECT_SQUARE,
+    "HORIZONTAL": ASPECT_LANDSCAPE,
+    "VERTICAL": ASPECT_PORTRAIT,
     "1:1": ASPECT_SQUARE,
     "9:16": ASPECT_PORTRAIT,
     "16:9": ASPECT_LANDSCAPE,
@@ -102,6 +106,10 @@ VIDEO_ASPECT_LANDSCAPE = 2
 VIDEO_ASPECT_BY_NAME = {
     "VIDEO_ASPECT_RATIO_PORTRAIT": VIDEO_ASPECT_PORTRAIT,
     "VIDEO_ASPECT_RATIO_LANDSCAPE": VIDEO_ASPECT_LANDSCAPE,
+    "PORTRAIT": VIDEO_ASPECT_PORTRAIT,
+    "LANDSCAPE": VIDEO_ASPECT_LANDSCAPE,
+    "VERTICAL": VIDEO_ASPECT_PORTRAIT,
+    "HORIZONTAL": VIDEO_ASPECT_LANDSCAPE,
     "9:16": VIDEO_ASPECT_PORTRAIT,
     "16:9": VIDEO_ASPECT_LANDSCAPE,
 }
@@ -221,8 +229,9 @@ def resolve_aspect(aspect: Any) -> int:
     """Take either the wire value or the REST-era name."""
     if isinstance(aspect, int):
         return aspect
+    key = str(aspect).strip().upper()
     try:
-        return ASPECT_BY_NAME[aspect]
+        return ASPECT_BY_NAME[key]
     except KeyError:
         raise ValueError(
             f"unknown aspect {aspect!r} — use one of {sorted(ASPECT_BY_NAME)} or 1-5"
@@ -235,8 +244,9 @@ def resolve_video_aspect(aspect: Any) -> int:
             # 3 is a perfectly good IMAGE aspect and a meaningless video one
             raise ValueError(f"video aspect must be 1 or 2, got {aspect}")
         return aspect
+    key = str(aspect).strip().upper()
     try:
-        return VIDEO_ASPECT_BY_NAME[aspect]
+        return VIDEO_ASPECT_BY_NAME[key]
     except KeyError:
         raise ValueError(
             f"unknown video aspect {aspect!r} — use one of "
