@@ -50,6 +50,7 @@ class FlowClient:
         self._operation_projects: dict[str, str] = {}
         self._operation_media: dict[str, str] = {}
         self._operation_polls: dict[str, int] = {}
+        self._operation_installations: dict[str, str] = {}
         # WS stats
         self._ws_connect_count = 0
         self._ws_disconnect_count = 0
@@ -578,7 +579,7 @@ class FlowClient:
             params["captchaAction"] = captcha_action
         if match:
             params["match"] = match
-        return await self._send("batch_rpc", params, timeout=timeout)
+        return await self._send("batch_rpc", params, timeout=timeout, preferred_installation=preferred_installation)
 
     async def _batch_payload(self, rpcid: str, freq: str,
                              captcha_action: str | None = None,
@@ -639,8 +640,8 @@ class FlowClient:
         legacy = VIDEO_MODELS.get(tier, {}).get(gen_type, {}).get(aspect_ratio)
         return fb.resolve_video_model(legacy)
 
-    def _remember_operation(self, operation_id: str, project_id: str):
-        """Which project an operation belongs to — the listing lookup needs it.
+    def _remember_operation(self, operation_id: str, project_id: str, installation_id: str | None = None):
+        """Which project and installation an operation belongs to — the listing lookup needs it.
 
         A poll record usually carries the project id, but old operations decay
         to a bare id, so keep our own note. Bounded: this is a cache, and the
@@ -652,7 +653,10 @@ class FlowClient:
             self._operation_projects.clear()
             self._operation_media.clear()
             self._operation_polls.clear()
+            self._operation_installations.clear()
         self._operation_projects[operation_id] = project_id
+        if installation_id:
+            self._operation_installations[operation_id] = installation_id
 
     # ─── High-level API Methods ──────────────────────────────
 
@@ -777,7 +781,7 @@ class FlowClient:
         except Exception as e:
             return _batch_error(e)
 
-        self._remember_operation(operation.operation_id, pid)
+        self._remember_operation(operation.operation_id, pid, installation_id=target_inst)
         return {"status": 200, "data": {"operations": [_as_pending_operation(operation.operation_id)]}}
 
     async def generate_video_from_references(self, reference_media_ids: list[str],
@@ -854,16 +858,17 @@ class FlowClient:
         return {"status": 200, "data": {"operations": out}}
 
     async def _poll_batch_operation(self, operation_id: str) -> dict:
+        target_inst = self._operation_installations.get(operation_id)
         media_id = self._operation_media.get(operation_id)
         complaint = None
 
         if not media_id:
-            media_id, complaint = await self._find_operation_media(operation_id)
+            media_id, complaint = await self._find_operation_media(operation_id, preferred_installation=target_inst)
             if not media_id:
                 return _as_pending_operation(operation_id, error=complaint)
             self._operation_media[operation_id] = media_id
 
-        urls = await self._batch_media_urls(media_id)
+        urls = await self._batch_media_urls(media_id, preferred_installation=target_inst)
         if not urls.video:
             # The id landed but the clip is still being written; downloading
             # now would save the poster still instead of the video.
@@ -881,7 +886,7 @@ class FlowClient:
             "status": "MEDIA_GENERATION_STATUS_SUCCESSFUL",
         }
 
-    async def _find_operation_media(self, operation_id: str) -> tuple[str | None, str | None]:
+    async def _find_operation_media(self, operation_id: str, preferred_installation: str | None = None) -> tuple[str | None, str | None]:
         """Ask the operation how it is going, then the listing where its media is.
 
         The listing is the authority — the poll has been seen to never report a
@@ -898,12 +903,14 @@ class FlowClient:
         try:
             operation = fb.read_operation(
                 await self._batch_payload(
-                    fb.RPC_OPERATION, fb.operation_request(operation_id), timeout=60)
+                    fb.RPC_OPERATION, fb.operation_request(operation_id), timeout=60,
+                    preferred_installation=preferred_installation,
+                )
             )
             complaint = operation.error
             project_id = operation.project_id or project_id
             if project_id:
-                self._remember_operation(operation_id, project_id)
+                self._remember_operation(operation_id, project_id, installation_id=preferred_installation)
             worth_looking = worth_looking or operation.done or operation.complained
         except Exception as e:
             # An operation that has decayed to a bare id still shows up in the
@@ -916,9 +923,9 @@ class FlowClient:
             return None, complaint
         if not project_id:
             return None, "no project id for the listing lookup"
-        return await self._media_id_for(operation_id, project_id), complaint
+        return await self._media_id_for(operation_id, project_id, preferred_installation=preferred_installation), complaint
 
-    async def _media_id_for(self, operation_id: str, project_id: str) -> str | None:
+    async def _media_id_for(self, operation_id: str, project_id: str, preferred_installation: str | None = None) -> str | None:
         """Find an operation's media id in the project listing.
 
         Asks the extension for an 800-byte window around the operation id
@@ -928,7 +935,7 @@ class FlowClient:
         """
         result = await self.batch_rpc(
             fb.RPC_PROJECT_MEDIA, fb.project_media_request(project_id),
-            match=operation_id, timeout=120,
+            match=operation_id, timeout=120, preferred_installation=preferred_installation,
         )
         if result.get("error"):
             raise fb.FlowBatchError(f"{fb.RPC_PROJECT_MEDIA}: {result['error']}")
@@ -943,9 +950,11 @@ class FlowClient:
                 media_id = None
         return media_id
 
-    async def _batch_media_urls(self, media_id: str) -> "fb.MediaUrls":
+    async def _batch_media_urls(self, media_id: str, preferred_installation: str | None = None) -> "fb.MediaUrls":
         payload = await self._batch_payload(
-            fb.RPC_MEDIA, fb.media_request(media_id), timeout=60)
+            fb.RPC_MEDIA, fb.media_request(media_id), timeout=60,
+            preferred_installation=preferred_installation,
+        )
         return fb.read_media_urls(payload, media_id)
 
     async def get_credits(self) -> dict:

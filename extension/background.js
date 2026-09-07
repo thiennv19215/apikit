@@ -244,6 +244,8 @@ async function captureTokenFromFlowTab() {
 async function detectFlowProjectId() {
   try {
     const tabs = await chrome.tabs.query({ url: flowUrls });
+    const uuidRegex = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
+
     for (const tab of tabs) {
       if (!tab.url) continue;
       // 1. Direct URL check: flow.google.com/project/<UUID>
@@ -266,19 +268,52 @@ async function detectFlowProjectId() {
       }
     }
 
-    // 2. If tab is on flow.google.com, probe DOM for recent project link
+    // 2. If tab is on flow.google.com, probe DOM, storage, and project links
     const activeTab = tabs.find((t) => !t.discarded) || tabs[0];
     if (activeTab?.id) {
       const results = await chrome.scripting.executeScript({
         target: { tabId: activeTab.id },
         func: () => {
-          const m = window.location.pathname.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+          const re = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
+          const m = window.location.pathname.match(re);
           if (m) return m[1];
-          const a = document.querySelector('a[href*="/project/"]');
-          if (a) {
-            const am = (a.getAttribute('href') || '').match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+
+          // 2a. Any link to /project/<uuid>
+          const links = Array.from(document.querySelectorAll('a[href*="/project/"]'));
+          for (const a of links) {
+            const am = (a.getAttribute('href') || '').match(re);
             if (am) return am[1];
           }
+
+          // 2b. Any element with project data attributes
+          const dataEls = Array.from(document.querySelectorAll('[data-project-id], [data-id]'));
+          for (const el of dataEls) {
+            const val = el.getAttribute('data-project-id') || el.getAttribute('data-id') || '';
+            const match = val.match(re);
+            if (match) return match[1];
+          }
+
+          // 2c. Look in localStorage
+          try {
+            for (let i = 0; i < localStorage.length; i++) {
+              const k = localStorage.key(i);
+              const v = localStorage.getItem(k);
+              if (v && v.includes('-')) {
+                const match = v.match(re);
+                if (match) return match[1];
+              }
+            }
+          } catch (_) {}
+
+          // 2d. Auto-create if completely empty and on dashboard
+          const newBtn = Array.from(document.querySelectorAll('button, a')).find(el => {
+            const text = (el.innerText || el.getAttribute('aria-label') || '').toLowerCase();
+            return text.includes('new project') || text.includes('create project') || text.includes('tạo dự án');
+          });
+          if (newBtn && !window.location.pathname.includes('/project/')) {
+            newBtn.click();
+          }
+
           return null;
         },
       });
@@ -409,22 +444,31 @@ function keepAlive() {
   }
 }
 
-function sendToAgent(msg) {
-  // API responses (with msg.id) go via HTTP — immune to WS disconnect
-  if (msg.id) {
-    fetch('http://127.0.0.1:8100/api/ext/callback', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(msg),
-    }).catch(() => {
-      // HTTP failed — fallback to WS
-      if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
-    });
-    return;
+function getCallbackUrl() {
+  try {
+    const url = new URL(agentWsUrl);
+    const protocol = url.protocol === 'wss:' ? 'https:' : 'http:';
+    return `${protocol}//${url.host}/api/ext/callback`;
+  } catch {
+    return 'http://127.0.0.1:8100/api/ext/callback';
   }
-  // Non-response messages (ping, status) or no secret yet — use WS
+}
+
+function sendToAgent(msg) {
+  // Always deliver via WebSocket if open
   if (ws?.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(msg));
+  }
+  // API responses (with msg.id) also post to HTTP callback as backup
+  if (msg.id) {
+    const callbackUrl = getCallbackUrl();
+    const headers = { 'Content-Type': 'application/json' };
+    if (callbackSecret) headers['X-Callback-Secret'] = callbackSecret;
+    fetch(callbackUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(msg),
+    }).catch(() => {});
   }
 }
 
@@ -567,6 +611,9 @@ const CAPTCHA_SLOT = '__CAPTCHA__';
 const MAX_RPC_TEXT = 32000000; // the project listing alone is past 17 MB
 
 async function runBatchRpc(cmd) {
+  if (!flowProjectId) {
+    await detectFlowProjectId();
+  }
   const tabs = await chrome.tabs.query({ url: flowUrls });
   let candidate = tabs.find((t) => !t.discarded) || tabs[0];
   if (!candidate) {
