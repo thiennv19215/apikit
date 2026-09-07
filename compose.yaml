@@ -13,7 +13,7 @@ services:
       - API_PORT=8100
       - WS_HOST=0.0.0.0
       - WS_PORT=9222
-      - FLOW_PROJECT_ID=${FLOW_PROJECT_ID:-d5bbfa42-a820-4feb-9d0d-b32de8dc7941}
+      - FLOW_PROJECT_ID=${FLOW_PROJECT_ID:-}
       - FLOW_ALLOW_DEGRADED=1
 
 volumes:

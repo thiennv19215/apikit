@@ -281,6 +281,18 @@ class FlowClient:
             asyncio.create_task(self._sync_tier())
             return
 
+        if data.get("type") == "flow_project_id_updated":
+            source_ws = websocket or self._extension_ws
+            if source_ws is not None and source_ws in self._extensions:
+                self._extensions[source_ws]["flow_project_id"] = data.get("flowProjectId")
+                logger.info(
+                    "Flow project ID updated for installation=%s profile=%s: %s",
+                    data.get("installationId"),
+                    self._extensions[source_ws].get("profile_name"),
+                    data.get("flowProjectId"),
+                )
+            return
+
         if data.get("type") == "media_urls_refresh":
             asyncio.create_task(self._refresh_media_urls(data.get("urls", [])))
             return
@@ -570,24 +582,34 @@ class FlowClient:
 
     async def _batch_payload(self, rpcid: str, freq: str,
                              captcha_action: str | None = None,
-                             timeout: float = 300):
+                             timeout: float = 300,
+                             preferred_installation: str | None = None):
         """One RPC, unwrapped to its inner payload. Raises on anything else."""
-        result = await self.batch_rpc(rpcid, freq, captcha_action, timeout=timeout)
+        result = await self.batch_rpc(
+            rpcid, freq, captcha_action, timeout=timeout,
+            preferred_installation=preferred_installation,
+        )
         if result.get("error"):
             raise fb.FlowBatchError(f"{rpcid}: {result['error']}")
         return fb.first_payload(result.get("data") or "", rpcid)
 
-    def _batch_project_id(self, project_id: str) -> str:
+    def _batch_project_id(self, project_id: str, preferred_installation: str | None = None) -> str:
         """The Flow project an RPC is scoped to.
 
-        Flow Kit stores the Flow project uuid as the local project id, but a
-        few call sites pass "0" or "" for project-less work; those fall back to
-        the pinned FLOW_PROJECT_ID.
+        1. Explicit valid UUID passed in request
+        2. Flow project associated with the target/preferred extension installation
+        3. Flow project from any currently connected extension session
+        4. Project from agent's active_project state
+        5. Global FLOW_PROJECT_ID environment variable (optional override)
         """
         if project_id and self._UUID_RE.match(str(project_id)):
             return str(project_id)
-        if FLOW_PROJECT_ID:
-            return FLOW_PROJECT_ID
+        if preferred_installation:
+            target_ws = self.get_extension_by_installation(preferred_installation)
+            if target_ws and target_ws in self._extensions:
+                sess_pid = self._extensions[target_ws].get("flow_project_id")
+                if sess_pid and self._UUID_RE.match(str(sess_pid)):
+                    return str(sess_pid)
         for sess in self._extensions.values():
             fpid = sess.get("flow_project_id")
             if fpid and self._UUID_RE.match(str(fpid)):
@@ -599,9 +621,11 @@ class FlowClient:
                 return str(state["project_id"])
         except Exception:
             pass
+        if FLOW_PROJECT_ID and self._UUID_RE.match(str(FLOW_PROJECT_ID)):
+            return str(FLOW_PROJECT_ID)
         raise fb.FlowBatchError(
-            "NO_FLOW_PROJECT: every batchexecute call is scoped to a Flow project. "
-            "Create one in the Flow UI and pin its uuid as FLOW_PROJECT_ID."
+            "NO_FLOW_PROJECT: No Flow project ID detected for this account. "
+            "Please open your project in flow.google.com or enter the Project ID in the extension popup."
         )
 
     def _batch_image_model(self, override: str | None = None) -> str:
@@ -668,14 +692,18 @@ class FlowClient:
             return await self._legacy_generate_images(
                 prompt, project_id, aspect_ratio, user_paygate_tier, character_media_ids)
 
+        cand_ws = self._select_extension(require_token=False)
+        target_inst = self._extensions[cand_ws].get("installation_id") if cand_ws in self._extensions else None
         try:
-            pid = self._batch_project_id(project_id)
+            pid = self._batch_project_id(project_id, preferred_installation=target_inst)
             freq = fb.image_request(
                 prompt, pid, count=1, aspect=aspect_ratio,
                 model=self._batch_image_model(image_model),
                 ref_media_ids=list(character_media_ids or []) or None,
             )
-            payload = await self._batch_payload(fb.RPC_GEN_IMAGE, freq, fb.CAPTCHA_IMAGE)
+            payload = await self._batch_payload(
+                fb.RPC_GEN_IMAGE, freq, fb.CAPTCHA_IMAGE, preferred_installation=target_inst
+            )
         except Exception as e:
             return _batch_error(e)
 
@@ -733,15 +761,18 @@ class FlowClient:
                 "running plain i2v because FLOW_ALLOW_DEGRADED=1",
                 str(scene_id)[:12], end_image_media_id[:12])
 
+        cand_ws = self._select_extension(require_token=False)
+        target_inst = self._extensions[cand_ws].get("installation_id") if cand_ws in self._extensions else None
         gen_type = "start_end_frame_2_video" if end_image_media_id else "frame_2_video"
         try:
-            pid = self._batch_project_id(project_id)
+            pid = self._batch_project_id(project_id, preferred_installation=target_inst)
             freq = fb.video_request(
                 prompt, pid, start_image_media_id, aspect=aspect_ratio,
                 model=self._batch_video_model(user_paygate_tier, gen_type, aspect_ratio),
             )
             payload = await self._batch_payload(
-                fb.RPC_GEN_VIDEO, freq, fb.CAPTCHA_VIDEO, timeout=120)
+                fb.RPC_GEN_VIDEO, freq, fb.CAPTCHA_VIDEO, timeout=120, preferred_installation=target_inst
+            )
             operation = fb.read_operation(payload)
         except Exception as e:
             return _batch_error(e)
@@ -960,12 +991,14 @@ class FlowClient:
         """Upload an image into the project so it can be used as a reference."""
         if not USE_BATCH_RPC:
             return await self._legacy_upload_image(image_base64, mime_type, project_id, file_name)
+        cand_ws = self._select_extension(require_token=False)
+        target_inst = self._extensions[cand_ws].get("installation_id") if cand_ws in self._extensions else None
         try:
-            pid = self._batch_project_id(project_id)
+            pid = self._batch_project_id(project_id, preferred_installation=target_inst)
             payload = await self._batch_payload(
                 fb.RPC_UPLOAD_IMAGE,
                 fb.upload_request(image_base64, pid, mime_type, file_name),
-                fb.CAPTCHA_IMAGE, timeout=120,
+                fb.CAPTCHA_IMAGE, timeout=120, preferred_installation=target_inst,
             )
             media_id = fb.read_uploaded_media_id(payload)
         except Exception as e:

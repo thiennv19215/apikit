@@ -161,6 +161,30 @@ function updateServerStatus() {
     if (urlInput && !urlInput.dataset.modified && res.agentWsUrl) {
       urlInput.value = res.agentWsUrl;
     }
+    if (projectInput && !projectInput.dataset.modified && res.flowProjectId) {
+      projectInput.value = res.flowProjectId;
+    }
+  });
+}
+
+const projectInput = document.getElementById('project-id-input');
+const saveProjectBtn = document.getElementById('btn-save-project');
+
+if (projectInput) {
+  projectInput.addEventListener('input', () => {
+    projectInput.dataset.modified = 'true';
+  });
+}
+
+if (saveProjectBtn && projectInput) {
+  saveProjectBtn.addEventListener('click', () => {
+    const val = projectInput.value.trim();
+    chrome.runtime.sendMessage({ type: 'SET_FLOW_PROJECT_ID', flowProjectId: val }, () => {
+      delete projectInput.dataset.modified;
+      saveProjectBtn.textContent = 'Saved!';
+      setTimeout(() => { saveProjectBtn.textContent = 'Save'; }, 1500);
+      updateServerStatus();
+    });
   });
 }
 

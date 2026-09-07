@@ -31,6 +31,7 @@ let ws = null;
 let installationId = null;
 let profileName = 'Browser profile';
 let flowKey = null;
+let flowProjectId = null;
 let callbackSecret = null;  // Auth secret for HTTP callback, received from server on WS connect
 let state = 'off'; // off | idle | running
 let manualDisconnect = false;
@@ -111,7 +112,7 @@ function ensureInitialized() {
 }
 
 async function initialize() {
-  const data = await chrome.storage.local.get(['flowKey', 'metrics', 'callbackSecret', 'installationId', 'agentWsUrl']);
+  const data = await chrome.storage.local.get(['flowKey', 'metrics', 'callbackSecret', 'installationId', 'agentWsUrl', 'flowProjectId']);
   if (data.agentWsUrl) {
     agentWsUrl = data.agentWsUrl;
   } else {
@@ -119,6 +120,7 @@ async function initialize() {
     void chrome.storage.local.set({ agentWsUrl });
   }
   if (data.flowKey) flowKey = data.flowKey;
+  if (data.flowProjectId) flowProjectId = data.flowProjectId;
   if (data.metrics) Object.assign(metrics, data.metrics);
   if (data.callbackSecret) callbackSecret = data.callbackSecret;
   if (data.installationId) {
@@ -132,6 +134,7 @@ async function initialize() {
     if (userInfo?.email) profileName = userInfo.email;
   } catch (_) {}
 
+  void detectFlowProjectId();
   connectToAgent();
   chrome.alarms.create('keepAlive', { periodInMinutes: 0.4 });
 }
@@ -147,6 +150,16 @@ chrome.storage?.onChanged?.addListener?.((changes, area) => {
         ws = null;
       }
       connectToAgent();
+    }
+  }
+  if (area === 'local' && changes.flowProjectId) {
+    flowProjectId = changes.flowProjectId.newValue || null;
+    if (ws?.readyState === WebSocket.OPEN && flowProjectId) {
+      ws.send(JSON.stringify({
+        type: 'flow_project_id_updated',
+        installationId,
+        flowProjectId,
+      }));
     }
   }
 });
@@ -226,6 +239,74 @@ async function captureTokenFromFlowTab() {
   }
 }
 
+// ─── Flow Project Auto-Detection ────────────────────────────
+
+async function detectFlowProjectId() {
+  try {
+    const tabs = await chrome.tabs.query({ url: flowUrls });
+    for (const tab of tabs) {
+      if (!tab.url) continue;
+      // 1. Direct URL check: flow.google.com/project/<UUID>
+      const match = tab.url.match(/\/project\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+      if (match) {
+        const detectedId = match[1];
+        if (detectedId !== flowProjectId) {
+          flowProjectId = detectedId;
+          await chrome.storage.local.set({ flowProjectId });
+          console.log('[FlowAgent] Auto-detected Flow project ID for profile', profileName, ':', flowProjectId);
+          if (ws?.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+              type: 'flow_project_id_updated',
+              installationId,
+              flowProjectId,
+            }));
+          }
+        }
+        return flowProjectId;
+      }
+    }
+
+    // 2. If tab is on flow.google.com, probe DOM for recent project link
+    const activeTab = tabs.find((t) => !t.discarded) || tabs[0];
+    if (activeTab?.id) {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId: activeTab.id },
+        func: () => {
+          const m = window.location.pathname.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+          if (m) return m[1];
+          const a = document.querySelector('a[href*="/project/"]');
+          if (a) {
+            const am = (a.getAttribute('href') || '').match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+            if (am) return am[1];
+          }
+          return null;
+        },
+      });
+      const domId = results?.[0]?.result;
+      if (domId && domId !== flowProjectId) {
+        flowProjectId = domId;
+        await chrome.storage.local.set({ flowProjectId });
+        console.log('[FlowAgent] Auto-detected Flow project ID from DOM for profile', profileName, ':', flowProjectId);
+        if (ws?.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            type: 'flow_project_id_updated',
+            installationId,
+            flowProjectId,
+          }));
+        }
+        return flowProjectId;
+      }
+    }
+  } catch (_) {}
+  return flowProjectId;
+}
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.url && (changeInfo.url.includes('flow.google.com') || changeInfo.url.includes('labs.google'))) {
+    void detectFlowProjectId();
+  }
+});
+
 // ─── WebSocket to Agent ─────────────────────────────────────
 
 function connectToAgent() {
@@ -242,10 +323,13 @@ function connectToAgent() {
     return;
   }
 
-  ws.onopen = () => {
+  ws.onopen = async () => {
     console.log('[FlowAgent] Connected to agent');
     chrome.alarms.clear('reconnect');
     setState('idle');
+
+    // Auto-detect project ID on connect
+    await detectFlowProjectId();
 
     // Token refresh alarm — 45 min gives buffer before ~60 min expiry
     chrome.alarms.create('token-refresh', { periodInMinutes: 45 });
@@ -257,6 +341,7 @@ function connectToAgent() {
       profileName,
       protocolVersion: 2,
       flowKeyPresent: !!flowKey,
+      flowProjectId,
       tokenAge: flowKey && metrics.tokenCapturedAt ? Date.now() - metrics.tokenCapturedAt : null,
     }));
     if (flowKey) {
@@ -797,6 +882,7 @@ chrome.runtime.onMessage.addListener((msg, _, reply) => {
       connected: ws?.readyState === WebSocket.OPEN,
       agentConnected: ws?.readyState === WebSocket.OPEN,
       agentWsUrl,
+      flowProjectId,
       flowKeyPresent: !!flowKey,
       manualDisconnect,
       tokenAge: metrics.tokenCapturedAt ? Date.now() - metrics.tokenCapturedAt : null,
@@ -808,6 +894,24 @@ chrome.runtime.onMessage.addListener((msg, _, reply) => {
       },
       state,
     });
+  }
+
+  if (msg.type === 'SET_FLOW_PROJECT_ID') {
+    const newPid = (msg.flowProjectId || '').trim() || null;
+    flowProjectId = newPid;
+    chrome.storage.local.set({ flowProjectId: newPid }).then(() => {
+      if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: 'flow_project_id_updated',
+          installationId,
+          flowProjectId: newPid,
+        }));
+      }
+      reply({ ok: true, flowProjectId: newPid });
+    }).catch((err) => {
+      reply({ ok: false, error: err?.message || String(err) });
+    });
+    return true;
   }
 
   if (msg.type === 'SET_WS_URL') {
