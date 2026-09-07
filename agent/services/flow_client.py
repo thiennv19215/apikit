@@ -166,12 +166,14 @@ class FlowClient:
                 preferred_installation
                 and session.get("installation_id") == preferred_installation
             )
+            has_project = bool(session.get("flow_project_id"))
             in_flight = session.get("in_flight", 0)
             last_call = session.get("last_call_at", 0.0)
 
             candidates.append({
                 "ws": ws,
                 "available": available,
+                "has_project": has_project,
                 "is_preferred": is_preferred,
                 "in_flight": in_flight,
                 "last_call_at": last_call,
@@ -180,13 +182,15 @@ class FlowClient:
 
         # Routing order:
         # 1. Available > unavailable
-        # 2. Preferred installation (affinity)
-        # 3. Least busy (lowest in_flight)
-        # 4. Round-robin dispatch among idle connections (oldest last_call_at first)
-        # 5. Recency of connection
+        # 2. Has detected Flow Project ID
+        # 3. Preferred installation (affinity)
+        # 4. Least busy (lowest in_flight)
+        # 5. Round-robin dispatch among idle connections (oldest last_call_at first)
+        # 6. Recency of connection
         candidates.sort(
             key=lambda item: (
                 item["available"],
+                item["has_project"],
                 item["is_preferred"],
                 -item["in_flight"],
                 -item["last_call_at"],
@@ -611,10 +615,16 @@ class FlowClient:
                 sess_pid = self._extensions[target_ws].get("flow_project_id")
                 if sess_pid and self._UUID_RE.match(str(sess_pid)):
                     return str(sess_pid)
-        for sess in self._extensions.values():
-            fpid = sess.get("flow_project_id")
-            if fpid and self._UUID_RE.match(str(fpid)):
-                return str(fpid)
+
+        # Give extension_ready a brief moment if extension has just reconnected
+        for _ in range(6):
+            for sess in self._extensions.values():
+                fpid = sess.get("flow_project_id")
+                if fpid and self._UUID_RE.match(str(fpid)):
+                    return str(fpid)
+            if not self._extensions:
+                break
+            time.sleep(0.4)
         try:
             from agent.api.active_project import _read_state
             state = _read_state()
