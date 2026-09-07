@@ -5,7 +5,8 @@ from pydantic import BaseModel, Field, model_validator
 
 
 class InlineImageInput(BaseModel):
-    image_base64: str
+    image_base64: str | None = None
+    media_id: str | None = None
     mime_type: str = "image/jpeg"
     file_name: str = "reference.png"
 
@@ -52,8 +53,10 @@ class VideoGenerationRequest(BaseModel):
     input_images: list[InlineImageInput] = Field(default_factory=list)
     aspect_ratio: str = "9:16"
     duration_seconds: int = 8
-    model: str | None = None
+    model: str | None = "omni_flash"
     quality: str | None = None
+    mode: str | None = None
+    model_family: str | None = None
     project_id: str | None = None
     start_media_id: str | None = None
     end_media_id: str | None = None

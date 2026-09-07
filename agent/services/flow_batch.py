@@ -212,7 +212,7 @@ def resolve_video_model(key: Optional[str]) -> str:
             return "veo_3_1_i2v_s_fast_ultra"
         if "lite_low_priority" in k or "relaxed" in k or "low_priority" in k:
             return "veo_3_1_i2v_lite_low_priority"
-        if "lite" in k or "fast" in k or "standard" in k or "veo" in k:
+        if "lite" in k or "fast" in k or "standard" in k or "veo" in k or "omni" in k or "flash" in k or "abra" in k:
             return "veo_3_1_i2v_lite"
     return VIDEO_MODEL
 

@@ -252,7 +252,7 @@ async def generate_video(payload: VideoGenerationRequest):
         "start_media_id": payload.start_media_id,
         "end_media_id": payload.end_media_id,
         "reference_media_ids": payload.reference_media_ids,
-        "model": payload.model or payload.quality,
+        "model": payload.model or payload.mode or payload.model_family or payload.quality or "omni_flash",
         "quality": payload.quality,
         "dialogue": payload.dialogue,
     }
