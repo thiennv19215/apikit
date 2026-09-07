@@ -150,6 +150,7 @@ CREATE TABLE IF NOT EXISTS request (
     edit_prompt   TEXT,    -- prompt for EDIT_IMAGE requests
     source_media_id TEXT,  -- source image media_id for EDIT_IMAGE requests
     installation_id TEXT,  -- Chrome extension profile installation ID
+    payload_json  TEXT,    -- custom payload for standalone client requests (base64 images, prompt, etc)
     created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
@@ -179,6 +180,9 @@ async def init_db():
         if "installation_id" not in req_columns:
             await db.execute("ALTER TABLE request ADD COLUMN installation_id TEXT")
             logger.info("Migrated: added installation_id column to request table")
+        if "payload_json" not in req_columns:
+            await db.execute("ALTER TABLE request ADD COLUMN payload_json TEXT")
+            logger.info("Migrated: added payload_json column to request table")
         # Backfill slugs for existing characters (Python-side since SQLite has no slugify)
         cursor = await db.execute("SELECT id, name FROM character WHERE slug IS NULL OR slug = ''")
         chars_without_slug = await cursor.fetchall()

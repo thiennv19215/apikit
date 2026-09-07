@@ -30,7 +30,7 @@ _COLUMNS = {
               "horizontal_upscale_url", "horizontal_upscale_media_id", "horizontal_upscale_status",
               "vertical_end_scene_media_id", "horizontal_end_scene_media_id",
               "trim_start", "trim_end", "duration", "display_order", "source", "transition_prompt", "narrator_text", "updated_at"},
-    "request": {"status", "request_id", "media_id", "output_url", "error_message", "retry_count", "next_retry_at", "source_media_id", "updated_at"},
+    "request": {"status", "request_id", "media_id", "output_url", "error_message", "retry_count", "next_retry_at", "source_media_id", "installation_id", "payload_json", "updated_at"},
 }
 
 

@@ -1,0 +1,223 @@
+"""Unit tests for FlowKit Client API v1 (/v1/...)."""
+import asyncio
+import json
+import pytest
+from httpx import AsyncClient, ASGITransport
+
+from agent.main import app
+from agent.db.schema import init_db, close_db, get_db, _db_lock
+from agent.db import crud
+from agent.worker.processor import _dispatch_client_v1
+
+
+@pytest.fixture(autouse=True)
+async def setup_test_db(tmp_path, monkeypatch):
+    test_db = str(tmp_path / "test_flowkit_v1.db")
+    monkeypatch.setattr("agent.config.DB_PATH", test_db)
+    monkeypatch.setattr("agent.db.schema.DB_PATH", test_db)
+    await init_db()
+    yield
+    await close_db()
+
+
+class FakeOps:
+    def __init__(self):
+        self.uploaded = []
+        self.generated_images = []
+        self.generated_videos = []
+        self._client = self
+
+    async def upload_image(self, image_base64, mime_type="image/jpeg", project_id="0", file_name="image.jpg"):
+        self.uploaded.append({"base64": image_base64, "mime": mime_type})
+        return {"status": 200, "_mediaId": "media-uuid-1234"}
+
+    async def generate_images(self, prompt, project_id="0", aspect_ratio="IMAGE_ASPECT_RATIO_LANDSCAPE",
+                              character_media_ids=None, image_model=None):
+        self.generated_images.append({
+            "prompt": prompt, "aspect": aspect_ratio, "refs": character_media_ids, "model": image_model
+        })
+        return {
+            "status": 200,
+            "data": {
+                "media": [
+                    {
+                        "name": "media-uuid-gen-5678",
+                        "image": {
+                            "generatedImage": {
+                                "mediaId": "media-uuid-gen-5678",
+                                "fifeUrl": "https://storage.googleapis.com/test/media-uuid-gen-5678.jpg",
+                            }
+                        }
+                    }
+                ]
+            }
+        }
+
+    async def generate_video(self, start_image_media_id, prompt, project_id="0", scene_id="",
+                             aspect_ratio="VIDEO_ASPECT_RATIO_PORTRAIT", end_image_media_id=None):
+        self.generated_videos.append({
+            "start": start_image_media_id, "prompt": prompt, "aspect": aspect_ratio
+        })
+        return {
+            "status": 200,
+            "data": {
+                "operations": [
+                    {
+                        "operation": {
+                            "name": "op_video_1234",
+                            "metadata": {
+                                "video": {
+                                    "mediaId": "video-uuid-9999",
+                                    "fifeUrl": "https://storage.googleapis.com/test/video-uuid-9999.mp4",
+                                }
+                            }
+                        },
+                        "status": "MEDIA_GENERATION_STATUS_SUCCESSFUL"
+                    }
+                ]
+            }
+        }
+
+    async def generate_video_from_references(self, reference_media_ids, prompt, project_id="0",
+                                             scene_id="", aspect_ratio="VIDEO_ASPECT_RATIO_PORTRAIT"):
+        return await self.generate_video(reference_media_ids[0], prompt, project_id, scene_id, aspect_ratio)
+
+
+@pytest.mark.asyncio
+async def test_image_generation_endpoint_and_status():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        # 1. Submit Image Generation
+        resp = await ac.post("/v1/images/generations", json={
+            "prompt": "A cybernetic tiger walking in neon jungle",
+            "aspect_ratio": "16:9",
+            "input_images": [
+                {"image_base64": "aGVsbG8=", "mime_type": "image/png"}
+            ]
+        })
+        assert resp.status_code == 202
+        body = resp.json()
+        job_id = body["job_id"]
+        assert body["status"] == "queued"
+        assert body["type"] == "image"
+
+        # 2. Check Job Status via POST
+        status_resp = await ac.post("/v1/jobs/status", json={"job_id": job_id})
+        assert status_resp.status_code == 200
+        status_body = status_resp.json()
+        assert status_body["job_id"] == job_id
+        assert status_body["status"] == "queued"
+
+        # 3. Check Job Status via GET
+        get_resp = await ac.get(f"/v1/jobs/{job_id}")
+        assert get_resp.status_code == 200
+        assert get_resp.json()["status"] == "queued"
+
+        # 4. Simulate Processor completing the job
+        await crud.update_request(
+            job_id,
+            status="COMPLETED",
+            media_id="media-uuid-gen-5678",
+            output_url="https://storage.googleapis.com/test/media-uuid-gen-5678.jpg"
+        )
+
+        completed_resp = await ac.get(f"/v1/jobs/{job_id}")
+        assert completed_resp.status_code == 200
+        comp_body = completed_resp.json()
+        assert comp_body["status"] == "complete"
+        assert len(comp_body["media"]) == 1
+        assert comp_body["media"][0]["url"] == "https://storage.googleapis.com/test/media-uuid-gen-5678.jpg"
+        assert comp_body["media"][0]["media_id"] == "media-uuid-gen-5678"
+
+
+@pytest.mark.asyncio
+async def test_video_generation_endpoint_and_status():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        # Submit Video Generation
+        resp = await ac.post("/v1/videos/generations", json={
+            "prompt": "Cybernetic tiger leaps forward",
+            "type": "text_to_video",
+            "aspect_ratio": "9:16",
+            "input_images": [
+                {"image_base64": "aGVsbG8=", "mime_type": "image/jpeg"}
+            ]
+        })
+        assert resp.status_code == 202
+        body = resp.json()
+        job_id = body["job_id"]
+        assert body["status"] == "queued"
+        assert body["type"] == "video"
+
+        # Verify query returns queued
+        stat_resp = await ac.get(f"/v1/jobs/{job_id}")
+        assert stat_resp.status_code == 200
+        assert stat_resp.json()["status"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_character_crud_endpoints():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        # 1. Create Character
+        create_resp = await ac.post("/v1/characters", json={
+            "name": "General Victor",
+            "description": "A seasoned commander with scarred silver armor",
+            "image_prompt": "Portrait of veteran commander, silver armor",
+            "entity_type": "character"
+        })
+        assert create_resp.status_code == 201
+        char = create_resp.json()
+        char_id = char["id"]
+        assert char["name"] == "General Victor"
+
+        # 2. Get Character
+        get_resp = await ac.get(f"/v1/characters/{char_id}")
+        assert get_resp.status_code == 200
+        assert get_resp.json()["id"] == char_id
+
+        # 3. List Characters
+        list_resp = await ac.get("/v1/characters")
+        assert list_resp.status_code == 200
+        assert any(c["id"] == char_id for c in list_resp.json())
+
+        # 4. Update Character
+        update_resp = await ac.patch(f"/v1/characters/{char_id}", json={
+            "description": "Updated veteran commander"
+        })
+        assert update_resp.status_code == 200
+        assert update_resp.json()["description"] == "Updated veteran commander"
+
+        # 5. Delete Character
+        del_resp = await ac.delete(f"/v1/characters/{char_id}")
+        assert del_resp.status_code == 204
+
+        # 6. Verify 404 after delete
+        not_found = await ac.get(f"/v1/characters/{char_id}")
+        assert not_found.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_dispatch_client_v1_auto_uploads_base64():
+    ops = FakeOps()
+    req = {
+        "id": "job_test_123",
+        "type": "GENERATE_IMAGE",
+        "project_id": "0",
+        "payload_json": json.dumps({
+            "prompt": "Warrior in golden armor",
+            "aspect_ratio": "IMAGE_ASPECT_RATIO_LANDSCAPE",
+            "input_images": [
+                {"image_base64": "dGVzdF9pbWFnZQ==", "mime_type": "image/png"}
+            ]
+        })
+    }
+
+    result = await _dispatch_client_v1(req, "HORIZONTAL", ops)
+    assert result.get("status") == 200
+    # Verified: uploaded base64 to Flow session
+    assert len(ops.uploaded) == 1
+    assert ops.uploaded[0]["base64"] == "dGVzdF9pbWFnZQ=="
+    # Verified: generated images using uploaded media ID as reference
+    assert len(ops.generated_images) == 1
+    assert "media-uuid-1234" in ops.generated_images[0]["refs"]

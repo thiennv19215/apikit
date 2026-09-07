@@ -315,6 +315,10 @@ async def _dispatch(req: dict, orientation: str) -> dict:
     req_type, rid = req["type"], req["id"]
     pid = req.get("project_id", "0")
 
+    # Client v1 standalone request (direct Base64 / decoupled from scenes)
+    if req.get("payload_json"):
+        return await _dispatch_client_v1(req, orientation, ops)
+
     # Scene-based operations
     if req_type in ("GENERATE_IMAGE", "REGENERATE_IMAGE", "EDIT_IMAGE",
                     "GENERATE_VIDEO", "REGENERATE_VIDEO", "GENERATE_VIDEO_REFS", "UPSCALE_VIDEO"):
@@ -361,6 +365,139 @@ async def _dispatch(req: dict, orientation: str) -> dict:
         return await ops.generate_reference_image(char, pid)
 
     return {"error": f"Unknown request type: {req_type}"}
+
+
+async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
+    """Execute stateless/decoupled generation request from v1 Client API."""
+    from agent.sdk.services.operations import _extract_operations, _poll_operations
+
+    req_type = req["type"]
+    rid = req["id"]
+    pid = req.get("project_id") or "0"
+
+    try:
+        payload = json.loads(req.get("payload_json") or "{}")
+    except Exception as e:
+        return {"error": f"Invalid payload_json: {e}"}
+
+    client = ops._client
+
+    # 1. Image Generation
+    if req_type in ("GENERATE_IMAGE", "REGENERATE_IMAGE", "GENERATE_CHARACTER_IMAGE"):
+        prompt = payload.get("prompt") or ""
+        aspect_ratio = payload.get("aspect_ratio") or (
+            "IMAGE_ASPECT_RATIO_PORTRAIT" if orientation == "VERTICAL" else "IMAGE_ASPECT_RATIO_LANDSCAPE"
+        )
+        model = payload.get("model")
+        input_images = payload.get("input_images") or []
+        ref_media_ids = list(payload.get("character_media_ids") or [])
+
+        # Auto-upload Base64 or collect media_ids
+        for img in input_images:
+            if not isinstance(img, dict):
+                continue
+            if img.get("media_id"):
+                ref_media_ids.append(img["media_id"])
+            elif img.get("image_base64"):
+                upload_res = await client.upload_image(
+                    image_base64=img["image_base64"],
+                    mime_type=img.get("mime_type") or "image/jpeg",
+                    project_id=pid,
+                )
+                if upload_res.get("error"):
+                    return upload_res
+                mid = upload_res.get("_mediaId") or upload_res.get("data", {}).get("media", {}).get("name")
+                if mid:
+                    ref_media_ids.append(mid)
+
+        return await client.generate_images(
+            prompt=prompt,
+            project_id=pid,
+            aspect_ratio=aspect_ratio,
+            character_media_ids=ref_media_ids if ref_media_ids else None,
+            image_model=model,
+        )
+
+    # 2. Video Generation
+    if req_type in ("GENERATE_VIDEO", "REGENERATE_VIDEO", "GENERATE_VIDEO_REFS"):
+        prompt = payload.get("prompt") or ""
+        aspect_ratio = payload.get("aspect_ratio") or (
+            "VIDEO_ASPECT_RATIO_PORTRAIT" if orientation == "VERTICAL" else "VIDEO_ASPECT_RATIO_LANDSCAPE"
+        )
+        start_media_id = payload.get("start_media_id")
+        end_media_id = payload.get("end_media_id")
+        ref_media_ids = list(payload.get("reference_media_ids") or [])
+        input_images = payload.get("input_images") or []
+
+        # Auto-upload Base64 or collect media_ids
+        uploaded_mids = []
+        for img in input_images:
+            if not isinstance(img, dict):
+                continue
+            if img.get("media_id"):
+                uploaded_mids.append(img["media_id"])
+            elif img.get("image_base64"):
+                upload_res = await client.upload_image(
+                    image_base64=img["image_base64"],
+                    mime_type=img.get("mime_type") or "image/jpeg",
+                    project_id=pid,
+                )
+                if upload_res.get("error"):
+                    return upload_res
+                mid = upload_res.get("_mediaId") or upload_res.get("data", {}).get("media", {}).get("name")
+                if mid:
+                    uploaded_mids.append(mid)
+
+        if uploaded_mids:
+            if not start_media_id:
+                start_media_id = uploaded_mids[0]
+                if len(uploaded_mids) > 1:
+                    ref_media_ids.extend(uploaded_mids[1:])
+            else:
+                ref_media_ids.extend(uploaded_mids)
+
+        is_ref_based = req_type == "GENERATE_VIDEO_REFS" or bool(ref_media_ids)
+
+        if is_ref_based and ref_media_ids:
+            submit_result = await client.generate_video_from_references(
+                reference_media_ids=ref_media_ids,
+                prompt=prompt,
+                project_id=pid,
+                scene_id="",
+                aspect_ratio=aspect_ratio,
+            )
+        else:
+            if not start_media_id:
+                return {"error": "Video generation requires start_media_id or input_images"}
+            submit_result = await client.generate_video(
+                start_image_media_id=start_media_id,
+                prompt=prompt,
+                project_id=pid,
+                scene_id="",
+                aspect_ratio=aspect_ratio,
+                end_image_media_id=end_media_id,
+            )
+
+        if _is_error(submit_result):
+            return submit_result
+
+        operations = _extract_operations(submit_result)
+        if not operations:
+            return {"error": "Video gen returned no operations"}
+
+        op_name = operations[0].get("operation", {}).get("name", "")
+        if rid:
+            await crud.update_request(rid, request_id=op_name)
+
+        status = operations[0].get("status", "")
+        if status == "MEDIA_GENERATION_STATUS_SUCCESSFUL":
+            return submit_result
+        if status == "MEDIA_GENERATION_STATUS_FAILED":
+            return {"error": f"Operation failed immediately: {op_name}"}
+
+        return await _poll_operations(client, operations)
+
+    return {"error": f"Unsupported client v1 request type: {req_type}"}
 
 
 async def _reupload_media(url: str, project_id: str) -> str | None:

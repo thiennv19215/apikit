@@ -24,6 +24,8 @@ from agent.api.music import router as music_router
 from agent.api.models import router as models_router
 from agent.api.providers import router as providers_router
 from agent.api.active_project import router as active_project_router
+from agent.api.v1.generations import router as v1_generations_router
+from agent.api.v1.characters import router as v1_characters_router
 from agent.worker.processor import get_worker_controller
 from agent.services.flow_client import get_flow_client
 from agent.services.event_bus import event_bus
@@ -157,6 +159,8 @@ app.include_router(music_router, prefix="/api")
 app.include_router(models_router)
 app.include_router(providers_router)
 app.include_router(active_project_router)
+app.include_router(v1_generations_router)
+app.include_router(v1_characters_router)
 
 
 import secrets as _secrets
