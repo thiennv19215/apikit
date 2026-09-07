@@ -77,7 +77,7 @@ Các endpoint này nhận yêu cầu bất đồng bộ (Asynchronous), trả v�
 ```json
 {
   "prompt": "A cybernetic samurai standing under cherry blossoms in neon rain",
-  "aspect_ratio": "9:16",
+  "aspect_ratio": "IMAGE_ASPECT_RATIO_LANDSCAPE",
   "model": "pro",
   "variant_count": 1,
   "input_images": [
@@ -88,38 +88,62 @@ Các endpoint này nhận yêu cầu bất đồng bộ (Asynchronous), trả v�
   ]
 }
 ```
-*Ghi chú `aspect_ratio`: hỗ trợ `"1:1"`, `"16:9"`, `"9:16"`, `"3:4"`, `"4:3"`.*
+*Ghi chú `aspect_ratio` cho Ảnh:*
+- **Chuẩn FlowKit Model:** `"IMAGE_ASPECT_RATIO_LANDSCAPE"` (Mặc định), `"IMAGE_ASPECT_RATIO_PORTRAIT"`, `"IMAGE_ASPECT_RATIO_SQUARE"`, `"IMAGE_ASPECT_RATIO_PORTRAIT_FOUR_THREE"`, `"IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE"`.
+- **Hỗ trợ Alias:** `"LANDSCAPE"`, `"PORTRAIT"`, `"SQUARE"`, `"HORIZONTAL"`, `"VERTICAL"`, `"16:9"`, `"9:16"`, `"1:1"`, `"3:4"`, `"4:3"`.
 
-#### 1.3.2. Sinh Video: `POST /v1/videos/generations`
+#### 1.3.2. Sinh Video: `POST /v1/videos/generations` (Omni Flash Mode)
+Hệ thống sử dụng model **Gemini Omni Flash** (`veo_3_1_i2v_lite` wire model). Mọi alias `"omni_flash"`, `"omni"`, `"flash"`, `"lite"` đều tự động map về Omni Flash.
+
 **Request Body (Image-to-Video - I2V):**
 ```json
 {
   "prompt": "Samurai draws katana with lightning aura, camera zooms in",
-  "type": "image_to_video",
-  "aspect_ratio": "9:16",
+  "mode": "omni_flash",
+  "generation_type": "image_to_video",
+  "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
   "duration_seconds": 8,
-  "quality": "lite",
   "input_images": [
     {
       "image_base64": "iVBORw0KGgoAAA...",
-      "mime_type": "image/jpeg"
+      "mime_type": "image/jpeg",
+      "role": "start_frame"
     }
   ]
 }
 ```
-**Request Body (Reference-to-Video - R2V / Omni):**
+**Request Body (Reference-to-Video - R2V / 1-7 Reference Images):**
 ```json
 {
-  "prompt": "Characters interact inside futuristic cockpit",
-  "type": "reference_to_video",
-  "aspect_ratio": "16:9",
+  "prompt": "Characters interact inside futuristic cockpit, dramatic blue lights",
+  "mode": "omni_flash",
+  "generation_type": "reference_to_video",
+  "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
   "duration_seconds": 8,
   "input_images": [
-    { "image_base64": "..." },
-    { "image_base64": "..." }
+    {
+      "image_base64": "iVBORw0KGgoAAA...",
+      "role": "reference"
+    },
+    {
+      "image_base64": "iVBORw0KGgoAAA...",
+      "role": "reference"
+    }
   ]
 }
 ```
+
+*Ghi chú `aspect_ratio` cho Video:*
+- **Chuẩn FlowKit Model:**
+  - `"VIDEO_ASPECT_RATIO_LANDSCAPE"` (Ngang / 16:9 - Mặc định)
+  - `"VIDEO_ASPECT_RATIO_PORTRAIT"` (Dọc / 9:16)
+- **Hỗ trợ Alias:** `"LANDSCAPE"`, `"PORTRAIT"`, `"HORIZONTAL"`, `"VERTICAL"`, `"16:9"`, `"9:16"`.
+
+*Cơ chế Base64 Auto-Cache:*
+- Client luôn gửi ảnh `image_base64`.
+- Backend tự động tính SHA-256 hash và tra cứu trong cache `(image_hash, project_id)`.
+- Nếu ảnh đã tải lên project đó rồi, backend tái sử dụng `media_id` ngay lập tức (0ms, 0 tốn captcha upload).
+- Tránh trùng lặp hoặc xung đột giữa các Google Account / Chrome Profile khác nhau.
 
 **Response Body chuẩn (202 Accepted):**
 ```json
