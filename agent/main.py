@@ -243,6 +243,17 @@ async def api_health():
     return {"ok": status_info["status"] != "waiting_for_provider", **status_info}
 
 
+@app.get("/api/debug/test-video")
+async def debug_test_video(model: str = "veo_3_1_i2v_lite_low_priority"):
+    from agent.services import flow_batch as fb
+    client = get_flow_client()
+    pid = client.active_project_id
+    mid = "4bfd4d2e-41bc-4b74-9588-c5240630d93d"
+    freq = fb.video_request("A cat moving", pid, mid, aspect=1, model=model)
+    res = await client.batch_rpc(fb.RPC_GEN_VIDEO, freq, fb.CAPTCHA_VIDEO, timeout=30)
+    return {"model": model, "result": res}
+
+
 @app.websocket("/ws")
 @app.websocket("/api/extensions/ws")
 async def extension_ws_fastapi(websocket: WebSocket):
