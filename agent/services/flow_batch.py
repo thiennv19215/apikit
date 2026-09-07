@@ -86,11 +86,11 @@ ASPECT_BY_NAME = {
 #: [tier][quality][aspect] and carried `…_portrait` / `…_fl` / `…_relaxed`
 #: variants; those are gone — aspect is its own slot now, and the suffixed
 #: names are rejected.
-VIDEO_MODEL = "veo_3_1_i2v_lite_low_priority"
+VIDEO_MODEL = "veo_3_1_i2v_lite"
 VIDEO_MODELS = {
-    "veo_3_1_i2v_lite_low_priority",
     "veo_3_1_i2v_lite",
     "veo_3_1_i2v_s_fast_ultra",
+    "veo_3_1_i2v_lite_low_priority",
 }
 
 #: Video aspect, and note it does NOT share the image encoding: here 1 is
@@ -208,11 +208,11 @@ def resolve_video_model(key: Optional[str]) -> str:
         k = key.strip().lower().replace("-", "_")
         if k in VIDEO_MODELS:
             return k
-        if "ultra" in k:
+        if "ultra" in k or "pro" in k:
             return "veo_3_1_i2v_s_fast_ultra"
         if "lite_low_priority" in k or "relaxed" in k or "low_priority" in k:
             return "veo_3_1_i2v_lite_low_priority"
-        if "lite" in k or "fast" in k:
+        if "lite" in k or "fast" in k or "standard" in k or "veo" in k:
             return "veo_3_1_i2v_lite"
     return VIDEO_MODEL
 
