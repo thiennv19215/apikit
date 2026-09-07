@@ -588,6 +588,17 @@ class FlowClient:
             return str(project_id)
         if FLOW_PROJECT_ID:
             return FLOW_PROJECT_ID
+        for sess in self._extensions.values():
+            fpid = sess.get("flow_project_id")
+            if fpid and self._UUID_RE.match(str(fpid)):
+                return str(fpid)
+        try:
+            from agent.api.active_project import _read_state
+            state = _read_state()
+            if state and state.get("project_id") and self._UUID_RE.match(str(state["project_id"])):
+                return str(state["project_id"])
+        except Exception:
+            pass
         raise fb.FlowBatchError(
             "NO_FLOW_PROJECT: every batchexecute call is scoped to a Flow project. "
             "Create one in the Flow UI and pin its uuid as FLOW_PROJECT_ID."
