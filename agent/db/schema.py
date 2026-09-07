@@ -58,6 +58,15 @@ CREATE TABLE IF NOT EXISTS project_character (
     PRIMARY KEY (project_id, character_id)
 );
 
+CREATE TABLE IF NOT EXISTS media_cache (
+    image_hash  TEXT NOT NULL,
+    project_id  TEXT NOT NULL,
+    media_id    TEXT NOT NULL,
+    file_name   TEXT,
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    PRIMARY KEY (image_hash, project_id)
+);
+
 CREATE TABLE IF NOT EXISTS video (
     id            TEXT PRIMARY KEY,
     project_id    TEXT NOT NULL REFERENCES project(id) ON DELETE CASCADE,

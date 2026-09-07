@@ -338,3 +338,33 @@ async def list_materials() -> list[dict]:
     db = await get_db()
     cur = await db.execute("SELECT * FROM material ORDER BY created_at")
     return [dict(r) for r in await cur.fetchall()]
+
+
+# ─── Media Cache ─────────────────────────────────────────────
+
+async def get_cached_media_id(image_hash: str, project_id: str = "0") -> str | None:
+    """Check if image hash has already been uploaded for this project."""
+    db = await get_db()
+    pid = project_id or "0"
+    async with _db_lock:
+        cur = await db.execute(
+            "SELECT media_id FROM media_cache WHERE image_hash = ? AND (project_id = ? OR project_id = '0')",
+            (image_hash, pid),
+        )
+        row = await cur.fetchone()
+        return row[0] if row else None
+
+
+async def set_cached_media_id(image_hash: str, project_id: str, media_id: str, file_name: str = None) -> None:
+    """Store mapped media_id for an image hash in the project."""
+    db = await get_db()
+    pid = project_id or "0"
+    now = _now()
+    async with _db_lock:
+        await db.execute(
+            """INSERT OR REPLACE INTO media_cache (image_hash, project_id, media_id, file_name, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (image_hash, pid, media_id, file_name, now),
+        )
+        await db.commit()
+

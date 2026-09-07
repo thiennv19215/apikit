@@ -15,6 +15,7 @@ class ImageUploadRequest(BaseModel):
     mime_type: str = "image/jpeg"
     file_name: str | None = "upload.png"
     project_id: str | None = None
+    installation_id: str | None = None
     required_credits: int = 0
     excluded_project_ids: list[str] = Field(default_factory=list)
 

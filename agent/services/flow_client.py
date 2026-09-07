@@ -149,7 +149,9 @@ class FlowClient:
             })
         return result
 
-    def _extension_candidates(self, require_token: bool, preferred_installation: str | None = None):
+    def _extension_candidates(self, require_token: bool,
+                              preferred_installation: str | None = None,
+                              preferred_project_id: str | None = None):
         """Return usable extensions in preferred routing order with load balancing."""
         now = time.time()
         candidates = []
@@ -162,6 +164,10 @@ class FlowClient:
                 else session.get("connected_at")
             )
             available = session.get("unavailable_until", 0) <= now
+            matches_project = bool(
+                preferred_project_id
+                and session.get("flow_project_id") == preferred_project_id
+            )
             is_preferred = bool(
                 preferred_installation
                 and session.get("installation_id") == preferred_installation
@@ -173,8 +179,9 @@ class FlowClient:
             candidates.append({
                 "ws": ws,
                 "available": available,
-                "has_project": has_project,
+                "matches_project": matches_project,
                 "is_preferred": is_preferred,
+                "has_project": has_project,
                 "in_flight": in_flight,
                 "last_call_at": last_call,
                 "recency": recency or 0,
@@ -182,16 +189,18 @@ class FlowClient:
 
         # Routing order:
         # 1. Available > unavailable
-        # 2. Has detected Flow Project ID
-        # 3. Preferred installation (affinity)
-        # 4. Least busy (lowest in_flight)
-        # 5. Round-robin dispatch among idle connections (oldest last_call_at first)
-        # 6. Recency of connection
+        # 2. Matches requested project_id (Project Affinity)
+        # 3. Preferred installation (Account/Profile Affinity)
+        # 4. Has detected Flow Project ID
+        # 5. Least busy (lowest in_flight)
+        # 6. Round-robin dispatch among idle connections (oldest last_call_at first)
+        # 7. Recency of connection
         candidates.sort(
             key=lambda item: (
                 item["available"],
-                item["has_project"],
+                item["matches_project"],
                 item["is_preferred"],
+                item["has_project"],
                 -item["in_flight"],
                 -item["last_call_at"],
                 item["recency"],
@@ -200,9 +209,15 @@ class FlowClient:
         )
         return [item["ws"] for item in candidates]
 
-    def _select_extension(self, require_token: bool):
+    def _select_extension(self, require_token: bool,
+                          preferred_installation: str | None = None,
+                          preferred_project_id: str | None = None):
         """Choose the preferred authenticated or connected extension."""
-        candidates = self._extension_candidates(require_token)
+        candidates = self._extension_candidates(
+            require_token,
+            preferred_installation=preferred_installation,
+            preferred_project_id=preferred_project_id,
+        )
         return candidates[0] if candidates else None
 
     @staticmethod
@@ -468,7 +483,9 @@ class FlowClient:
                     refreshed, len(targets), project_id[:12])
         return {"refreshed": refreshed, "found": len(targets)}
 
-    async def _send(self, method: str, params: dict, timeout: float = 300, preferred_installation: str | None = None) -> dict:
+    async def _send(self, method: str, params: dict, timeout: float = 300,
+                    preferred_installation: str | None = None,
+                    preferred_project_id: str | None = None) -> dict:
         """Send request to extension and wait for response.
 
         Always returns a dict. On error, returns {"error": "<reason>"} — callers
@@ -482,6 +499,7 @@ class FlowClient:
         extension_candidates = self._extension_candidates(
             require_token=needs_token,
             preferred_installation=preferred_installation,
+            preferred_project_id=preferred_project_id,
         )
         if not extension_candidates and needs_token:
             return {"error": "NO_FLOW_KEY"}
@@ -570,7 +588,8 @@ class FlowClient:
                         captcha_action: str | None = None,
                         match: str | None = None,
                         timeout: float = 300,
-                        preferred_installation: str | None = None) -> dict:
+                        preferred_installation: str | None = None,
+                        preferred_project_id: str | None = None) -> dict:
         """Run one batchexecute RPC in the Flow page. Returns the raw body.
 
         ``match`` asks the extension to cut the response down to an 800-byte
@@ -583,20 +602,31 @@ class FlowClient:
             params["captchaAction"] = captcha_action
         if match:
             params["match"] = match
-        return await self._send("batch_rpc", params, timeout=timeout, preferred_installation=preferred_installation)
+        return await self._send("batch_rpc", params, timeout=timeout,
+                                preferred_installation=preferred_installation,
+                                preferred_project_id=preferred_project_id)
 
     async def _batch_payload(self, rpcid: str, freq: str,
                              captcha_action: str | None = None,
                              timeout: float = 300,
-                             preferred_installation: str | None = None):
+                             preferred_installation: str | None = None,
+                             preferred_project_id: str | None = None):
         """One RPC, unwrapped to its inner payload. Raises on anything else."""
         result = await self.batch_rpc(
             rpcid, freq, captcha_action, timeout=timeout,
             preferred_installation=preferred_installation,
+            preferred_project_id=preferred_project_id,
         )
         if result.get("error"):
             raise fb.FlowBatchError(f"{rpcid}: {result['error']}")
         return fb.first_payload(result.get("data") or "", rpcid)
+
+    @property
+    def active_project_id(self) -> str:
+        try:
+            return self._batch_project_id("")
+        except Exception:
+            return ""
 
     def _batch_project_id(self, project_id: str, preferred_installation: str | None = None) -> str:
         """The Flow project an RPC is scoped to.
@@ -696,7 +726,8 @@ class FlowClient:
                                aspect_ratio: str = "IMAGE_ASPECT_RATIO_PORTRAIT",
                                user_paygate_tier: str = "PAYGATE_TIER_TWO",
                                character_media_ids: list[str] = None,
-                               image_model: str = None) -> dict:
+                               image_model: str = None,
+                               preferred_installation: str | None = None) -> dict:
         """Generate image(s).
 
         ``character_media_ids`` are attached as reference images, which is what
@@ -708,8 +739,14 @@ class FlowClient:
             return await self._legacy_generate_images(
                 prompt, project_id, aspect_ratio, user_paygate_tier, character_media_ids)
 
-        cand_ws = self._select_extension(require_token=False)
-        target_inst = self._extensions[cand_ws].get("installation_id") if cand_ws in self._extensions else None
+        cand_ws = self._select_extension(
+            require_token=False,
+            preferred_installation=preferred_installation,
+            preferred_project_id=project_id or None,
+        )
+        target_inst = preferred_installation or (
+            self._extensions[cand_ws].get("installation_id") if cand_ws in self._extensions else None
+        )
         try:
             pid = self._batch_project_id(project_id, preferred_installation=target_inst)
             freq = fb.image_request(
@@ -718,7 +755,9 @@ class FlowClient:
                 ref_media_ids=list(character_media_ids or []) or None,
             )
             payload = await self._batch_payload(
-                fb.RPC_GEN_IMAGE, freq, fb.CAPTCHA_IMAGE, preferred_installation=target_inst
+                fb.RPC_GEN_IMAGE, freq, fb.CAPTCHA_IMAGE,
+                preferred_installation=target_inst,
+                preferred_project_id=pid,
             )
         except Exception as e:
             return _batch_error(e)
@@ -732,7 +771,8 @@ class FlowClient:
                           project_id: str,
                           aspect_ratio: str = "IMAGE_ASPECT_RATIO_PORTRAIT",
                           user_paygate_tier: str = "PAYGATE_TIER_ONE",
-                          character_media_ids: list[str] = None) -> dict:
+                          character_media_ids: list[str] = None,
+                          preferred_installation: str | None = None) -> dict:
         """Regenerate from an existing image plus any entity references.
 
         The REST path had a dedicated base-image input type; the new payload's
@@ -753,6 +793,7 @@ class FlowClient:
         return await self.generate_images(
             prompt=prompt, project_id=project_id, aspect_ratio=aspect_ratio,
             user_paygate_tier=user_paygate_tier, character_media_ids=refs,
+            preferred_installation=preferred_installation,
         )
 
     async def generate_video(self, start_image_media_id: str, prompt: str,
@@ -760,7 +801,8 @@ class FlowClient:
                               aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
                               end_image_media_id: str = None,
                               user_paygate_tier: str = "PAYGATE_TIER_TWO",
-                              video_model: str | None = None) -> dict:
+                              video_model: str | None = None,
+                              preferred_installation: str | None = None) -> dict:
         """Submit an i2v generation. Returns operations for the poller."""
         if not USE_BATCH_RPC:
             return await self._legacy_generate_video(
@@ -778,8 +820,14 @@ class FlowClient:
                 "running plain i2v because FLOW_ALLOW_DEGRADED=1",
                 str(scene_id)[:12], end_image_media_id[:12])
 
-        cand_ws = self._select_extension(require_token=False)
-        target_inst = self._extensions[cand_ws].get("installation_id") if cand_ws in self._extensions else None
+        cand_ws = self._select_extension(
+            require_token=False,
+            preferred_installation=preferred_installation,
+            preferred_project_id=project_id or None,
+        )
+        target_inst = preferred_installation or (
+            self._extensions[cand_ws].get("installation_id") if cand_ws in self._extensions else None
+        )
         gen_type = "start_end_frame_2_video" if end_image_media_id else "frame_2_video"
         try:
             pid = self._batch_project_id(project_id, preferred_installation=target_inst)
@@ -788,7 +836,9 @@ class FlowClient:
                 model=self._batch_video_model(user_paygate_tier, gen_type, aspect_ratio, override=video_model),
             )
             payload = await self._batch_payload(
-                fb.RPC_GEN_VIDEO, freq, fb.CAPTCHA_VIDEO, timeout=120, preferred_installation=target_inst
+                fb.RPC_GEN_VIDEO, freq, fb.CAPTCHA_VIDEO, timeout=120,
+                preferred_installation=target_inst,
+                preferred_project_id=pid,
             )
             operation = fb.read_operation(payload)
         except Exception as e:
@@ -1010,23 +1060,67 @@ class FlowClient:
         return {"status": 200, "data": data}
 
     async def upload_image(self, image_base64: str, mime_type: str = "image/jpeg",
-                            project_id: str = "", file_name: str = "image.jpg") -> dict:
+                            project_id: str = "", file_name: str = "image.jpg",
+                            preferred_installation: str | None = None) -> dict:
         """Upload an image into the project so it can be used as a reference."""
+        import hashlib
+        from agent.db import crud
+
         if not USE_BATCH_RPC:
             return await self._legacy_upload_image(image_base64, mime_type, project_id, file_name)
-        cand_ws = self._select_extension(require_token=False)
-        target_inst = self._extensions[cand_ws].get("installation_id") if cand_ws in self._extensions else None
+        cand_ws = self._select_extension(
+            require_token=False,
+            preferred_installation=preferred_installation,
+            preferred_project_id=project_id or None,
+        )
+        target_inst = preferred_installation or (
+            self._extensions[cand_ws].get("installation_id") if cand_ws in self._extensions else None
+        )
         try:
             pid = self._batch_project_id(project_id, preferred_installation=target_inst)
+
+            # Check Media Cache before making network request to Google Flow
+            clean_b64 = image_base64.split(",")[-1].strip()
+            img_hash = hashlib.sha256(clean_b64.encode("utf-8")).hexdigest()
+            try:
+                cached_mid = await crud.get_cached_media_id(img_hash, pid)
+                if cached_mid:
+                    logger.info("Media Cache HIT: hash=%s... -> media_id=%s (project=%s)",
+                                img_hash[:12], cached_mid[:20], pid[:8] if pid else "default")
+                    return {
+                        "status": 200,
+                        "data": {"media": {"name": cached_mid}},
+                        "_mediaId": cached_mid,
+                        "_projectId": pid,
+                        "_cacheHit": True,
+                    }
+            except Exception as e:
+                logger.warning("Media cache lookup error: %s", e)
+
             payload = await self._batch_payload(
                 fb.RPC_UPLOAD_IMAGE,
                 fb.upload_request(image_base64, pid, mime_type, file_name),
-                fb.CAPTCHA_IMAGE, timeout=120, preferred_installation=target_inst,
+                fb.CAPTCHA_IMAGE, timeout=120,
+                preferred_installation=target_inst,
+                preferred_project_id=pid,
             )
             media_id = fb.read_uploaded_media_id(payload)
+            if media_id:
+                try:
+                    await crud.set_cached_media_id(img_hash, pid, media_id, file_name)
+                    logger.info("Media Cache SAVED: hash=%s... -> media_id=%s (project=%s)",
+                                img_hash[:12], media_id[:20], pid[:8] if pid else "default")
+                except Exception as e:
+                    logger.warning("Media cache save error: %s", e)
         except Exception as e:
             return _batch_error(e)
-        return {"status": 200, "data": {"media": {"name": media_id}}, "_mediaId": media_id}
+        return {
+            "status": 200,
+            "data": {"media": {"name": media_id}},
+            "_mediaId": media_id,
+            "_projectId": pid,
+            "_cacheHit": False,
+        }
 
     # ─── Legacy REST methods (aisandbox-pa, pre-migration) ───
 

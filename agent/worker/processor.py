@@ -373,12 +373,16 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
 
     req_type = req["type"]
     rid = req["id"]
-    pid = req.get("project_id") or "0"
+    pid = req.get("project_id") or ""
 
     try:
         payload = json.loads(req.get("payload_json") or "{}")
     except Exception as e:
         return {"error": f"Invalid payload_json: {e}"}
+
+    if payload.get("project_id"):
+        pid = payload["project_id"]
+    inst_id = req.get("installation_id") or payload.get("installation_id")
 
     client = ops._client
 
@@ -393,6 +397,7 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
         ref_media_ids = list(payload.get("character_media_ids") or [])
 
         # Auto-upload Base64 or collect media_ids
+        payload_modified = False
         for img in input_images:
             if not isinstance(img, dict):
                 continue
@@ -403,12 +408,22 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
                     image_base64=img["image_base64"],
                     mime_type=img.get("mime_type") or "image/jpeg",
                     project_id=pid,
+                    preferred_installation=inst_id,
                 )
                 if upload_res.get("error"):
                     return upload_res
                 mid = upload_res.get("_mediaId") or upload_res.get("data", {}).get("media", {}).get("name")
                 if mid:
+                    img["media_id"] = mid
+                    img.pop("image_base64", None)
+                    payload_modified = True
                     ref_media_ids.append(mid)
+
+        if payload_modified:
+            try:
+                await crud.update_request(rid, payload_json=json.dumps(payload))
+            except Exception as e:
+                logger.warning("Failed to cache uploaded media_id in request %s: %s", rid[:8], e)
 
         return await client.generate_images(
             prompt=prompt,
@@ -416,6 +431,7 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
             aspect_ratio=aspect_ratio,
             character_media_ids=ref_media_ids if ref_media_ids else None,
             image_model=model,
+            preferred_installation=inst_id,
         )
 
     # 2. Video Generation
@@ -432,6 +448,7 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
 
         # Auto-upload Base64 or collect media_ids
         uploaded_mids = []
+        payload_modified = False
         for img in input_images:
             if not isinstance(img, dict):
                 continue
@@ -442,12 +459,22 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
                     image_base64=img["image_base64"],
                     mime_type=img.get("mime_type") or "image/jpeg",
                     project_id=pid,
+                    preferred_installation=inst_id,
                 )
                 if upload_res.get("error"):
                     return upload_res
                 mid = upload_res.get("_mediaId") or upload_res.get("data", {}).get("media", {}).get("name")
                 if mid:
+                    img["media_id"] = mid
+                    img.pop("image_base64", None)
+                    payload_modified = True
                     uploaded_mids.append(mid)
+
+        if payload_modified:
+            try:
+                await crud.update_request(rid, payload_json=json.dumps(payload))
+            except Exception as e:
+                logger.warning("Failed to cache uploaded video media_id in request %s: %s", rid[:8], e)
 
         if uploaded_mids:
             if not start_media_id:
@@ -479,6 +506,7 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
                 aspect_ratio=aspect_ratio,
                 end_image_media_id=end_media_id,
                 video_model=video_model,
+                preferred_installation=inst_id,
             )
 
         if _is_error(submit_result):
@@ -603,10 +631,10 @@ async def _handle_failure(rid: str, req: dict, result: dict, retry_after: dict =
 
     error_lower = str(error_msg).lower()
 
-    if "unsupported_on_batch_api" in error_lower:
+    if "unsupported_on_batch_api" in error_lower or "failed: [3]" in error_lower or "invalid_argument" in error_lower:
         await crud.update_request(rid, status="FAILED", error_message=str(error_msg))
         await _mark_scene_failed(req)
-        logger.error("Request %s FAILED (not retryable): %s", rid[:8], error_msg)
+        logger.error("Request %s FAILED (not retryable - invalid argument): %s", rid[:8], error_msg)
         return
 
     if "no_flow_project" in error_lower:

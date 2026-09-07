@@ -170,6 +170,8 @@ async def upload_image(payload: ImageUploadRequest):
         image_base64=payload.image_base64,
         mime_type=payload.mime_type,
         file_name=payload.file_name or "image.jpg",
+        project_id=payload.project_id or "",
+        preferred_installation=payload.installation_id,
     )
     if result.get("error"):
         raise HTTPException(status_code=502, detail=result["error"])
@@ -178,19 +180,22 @@ async def upload_image(payload: ImageUploadRequest):
     if not media_id:
         raise HTTPException(status_code=502, detail="Failed to retrieve uploaded media ID")
 
+    active_pid = result.get("_projectId") or payload.project_id or client.active_project_id or ""
+    is_cache_hit = "1" if result.get("_cacheHit") else "0"
+
     response_data = {
         "media_id": media_id,
         "file_name": payload.file_name,
         "media": {
             "name": media_id,
-            "projectId": client.active_project_id or "",
+            "projectId": active_pid,
         },
     }
     return JSONResponse(
         content=response_data,
         headers={
-            "X-Flow-Project-Id": client.active_project_id or "",
-            "X-Flow-Media-Cache-Hits": "0",
+            "X-Flow-Project-Id": active_pid,
+            "X-Flow-Media-Cache-Hits": is_cache_hit,
         },
     )
 
