@@ -54,11 +54,15 @@ async def create_character(body: CharacterCreateRequest):
             if not res.get("error"):
                 media_id = res.get("_mediaId") or res.get("data", {}).get("media", {}).get("name")
 
+    raw_type = (body.entity_type or "character").lower()
+    valid_types = {'character', 'location', 'creature', 'visual_asset', 'generic_troop', 'faction'}
+    entity_type = raw_type if raw_type in valid_types else "character"
+
     char_data = await crud.create_character(
         name=body.name,
         description=body.description or "",
         image_prompt=body.image_prompt or "",
-        entity_type=body.entity_type or "PERSON",
+        entity_type=entity_type,
         media_id=media_id,
         reference_image_url=ref_url,
     )
