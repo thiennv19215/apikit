@@ -23,7 +23,7 @@ class ImageUploadResponse(BaseModel):
 class ImageGenerationRequest(BaseModel):
     prompt: str
     input_images: list[InlineImageInput] | None = None
-    aspect_ratio: Literal["16:9", "9:16", "1:1", "IMAGE_ASPECT_RATIO_LANDSCAPE", "IMAGE_ASPECT_RATIO_PORTRAIT", "IMAGE_ASPECT_RATIO_SQUARE"] = "16:9"
+    aspect_ratio: str = "16:9"
     model: str | None = None
     count: int = 1
     quality: str | None = None
@@ -31,13 +31,11 @@ class ImageGenerationRequest(BaseModel):
 
 class VideoGenerationRequest(BaseModel):
     prompt: str
-    type: Literal[
-        "image_to_video", "start_to_video", "frames_to_video",
-        "reference_to_video", "ingredients", "references", "omni", "r2v", "frames"
-    ] | str = "image_to_video"
+    type: str = "image_to_video"
     input_images: list[InlineImageInput] = Field(default_factory=list)
-    aspect_ratio: Literal["16:9", "9:16", "VIDEO_ASPECT_RATIO_LANDSCAPE", "VIDEO_ASPECT_RATIO_PORTRAIT"] = "9:16"
-    duration_seconds: Literal[4, 6, 8, 10] | int = 8
+    aspect_ratio: str = "9:16"
+    duration_seconds: int = 8
+    model: str | None = None
     quality: str | None = None
     start_media_id: str | None = None
     end_media_id: str | None = None

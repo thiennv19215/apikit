@@ -428,6 +428,7 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
         end_media_id = payload.get("end_media_id")
         ref_media_ids = list(payload.get("reference_media_ids") or [])
         input_images = payload.get("input_images") or []
+        video_model = payload.get("model") or payload.get("quality")
 
         # Auto-upload Base64 or collect media_ids
         uploaded_mids = []
@@ -465,6 +466,7 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
                 project_id=pid,
                 scene_id="",
                 aspect_ratio=aspect_ratio,
+                video_model=video_model,
             )
         else:
             if not start_media_id:
@@ -476,6 +478,7 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
                 scene_id="",
                 aspect_ratio=aspect_ratio,
                 end_image_media_id=end_media_id,
+                video_model=video_model,
             )
 
         if _is_error(submit_result):

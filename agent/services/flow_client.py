@@ -636,7 +636,9 @@ class FlowClient:
             override or _config.IMAGE_MODELS.get(nickname) or nickname
         )
 
-    def _batch_video_model(self, tier: str, gen_type: str, aspect_ratio: str) -> str:
+    def _batch_video_model(self, tier: str, gen_type: str, aspect_ratio: str, override: str | None = None) -> str:
+        if override:
+            return fb.resolve_video_model(override)
         legacy = VIDEO_MODELS.get(tier, {}).get(gen_type, {}).get(aspect_ratio)
         return fb.resolve_video_model(legacy)
 
@@ -747,7 +749,8 @@ class FlowClient:
                               project_id: str, scene_id: str,
                               aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
                               end_image_media_id: str = None,
-                              user_paygate_tier: str = "PAYGATE_TIER_TWO") -> dict:
+                              user_paygate_tier: str = "PAYGATE_TIER_TWO",
+                              video_model: str | None = None) -> dict:
         """Submit an i2v generation. Returns operations for the poller."""
         if not USE_BATCH_RPC:
             return await self._legacy_generate_video(
@@ -772,7 +775,7 @@ class FlowClient:
             pid = self._batch_project_id(project_id, preferred_installation=target_inst)
             freq = fb.video_request(
                 prompt, pid, start_image_media_id, aspect=aspect_ratio,
-                model=self._batch_video_model(user_paygate_tier, gen_type, aspect_ratio),
+                model=self._batch_video_model(user_paygate_tier, gen_type, aspect_ratio, override=video_model),
             )
             payload = await self._batch_payload(
                 fb.RPC_GEN_VIDEO, freq, fb.CAPTCHA_VIDEO, timeout=120, preferred_installation=target_inst
@@ -787,7 +790,8 @@ class FlowClient:
     async def generate_video_from_references(self, reference_media_ids: list[str],
                                               prompt: str, project_id: str, scene_id: str,
                                               aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
-                                              user_paygate_tier: str = "PAYGATE_TIER_TWO") -> dict:
+                                              user_paygate_tier: str = "PAYGATE_TIER_TWO",
+                                              video_model: str | None = None) -> dict:
         """Generate video from multiple reference images (r2v)."""
         if not USE_BATCH_RPC:
             return await self._legacy_generate_video_from_references(
@@ -808,7 +812,7 @@ class FlowClient:
         return await self.generate_video(
             start_image_media_id=reference_media_ids[0], prompt=prompt,
             project_id=project_id, scene_id=scene_id, aspect_ratio=aspect_ratio,
-            user_paygate_tier=user_paygate_tier,
+            user_paygate_tier=user_paygate_tier, video_model=video_model,
         )
 
     async def upscale_video(self, media_id: str, scene_id: str,

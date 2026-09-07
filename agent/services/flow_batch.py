@@ -75,6 +75,11 @@ ASPECT_BY_NAME = {
     "IMAGE_ASPECT_RATIO_LANDSCAPE": ASPECT_LANDSCAPE,
     "IMAGE_ASPECT_RATIO_PORTRAIT_FOUR_THREE": ASPECT_PORTRAIT_4_3,
     "IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE": ASPECT_LANDSCAPE_4_3,
+    "1:1": ASPECT_SQUARE,
+    "9:16": ASPECT_PORTRAIT,
+    "16:9": ASPECT_LANDSCAPE,
+    "3:4": ASPECT_PORTRAIT_4_3,
+    "4:3": ASPECT_LANDSCAPE_4_3,
 }
 
 #: Video models this path accepts. The REST-era map was keyed by
@@ -97,6 +102,8 @@ VIDEO_ASPECT_LANDSCAPE = 2
 VIDEO_ASPECT_BY_NAME = {
     "VIDEO_ASPECT_RATIO_PORTRAIT": VIDEO_ASPECT_PORTRAIT,
     "VIDEO_ASPECT_RATIO_LANDSCAPE": VIDEO_ASPECT_LANDSCAPE,
+    "9:16": VIDEO_ASPECT_PORTRAIT,
+    "16:9": VIDEO_ASPECT_LANDSCAPE,
 }
 
 #: `CAE` is the operation's terminal state. Anything else means still working.
@@ -182,30 +189,30 @@ class MediaUrls:
 def resolve_image_model(key: Optional[str]) -> str:
     """Nickname or wire name in, wire name out; anything unknown coerces."""
     if isinstance(key, str):
-        if key in IMAGE_MODEL_BY_NICKNAME:
-            return IMAGE_MODEL_BY_NICKNAME[key]
-        if key in IMAGE_MODELS:
-            return key
+        k = key.strip()
+        k_upper = k.upper().replace("-", "_")
+        if k_upper in IMAGE_MODEL_BY_NICKNAME:
+            return IMAGE_MODEL_BY_NICKNAME[k_upper]
+        if k_upper in IMAGE_MODELS:
+            return k_upper
+        if "PRO" in k_upper or "IMAGEN_3" in k_upper or "GEM_PIX" in k_upper:
+            return "GEM_PIX_2"
+        if "NARWHAL" in k_upper or "BANANA_2" in k_upper or "FAST" in k_upper:
+            return "NARWHAL"
     return IMAGE_MODEL
 
 
 def resolve_video_model(key: Optional[str]) -> str:
-    """Map a REST-era model key onto one the batch path accepts.
-
-    The old keys encoded tier, quality, aspect and chaining in the name
-    (``veo_3_1_i2v_s_fast_ultra_relaxed``, ``…_portrait``, ``…_fl``). Aspect
-    and chaining are their own slots now and the suffixed names are rejected,
-    so the tier/quality intent is all that survives: anything that asked for
-    "ultra" gets the ultra model, anything else lands on the lite default.
-    """
+    """Map a REST-era model key or friendly alias onto one the batch path accepts."""
     if isinstance(key, str):
-        if key in VIDEO_MODELS:
-            return key
-        if "ultra" in key:
+        k = key.strip().lower().replace("-", "_")
+        if k in VIDEO_MODELS:
+            return k
+        if "ultra" in k:
             return "veo_3_1_i2v_s_fast_ultra"
-        if "lite_low_priority" in key:
+        if "lite_low_priority" in k or "relaxed" in k or "low_priority" in k:
             return "veo_3_1_i2v_lite_low_priority"
-        if "lite" in key:
+        if "lite" in k or "fast" in k:
             return "veo_3_1_i2v_lite"
     return VIDEO_MODEL
 

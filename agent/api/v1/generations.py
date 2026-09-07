@@ -31,11 +31,15 @@ def _normalize_image_aspect(aspect: str) -> str:
         "16:9": "IMAGE_ASPECT_RATIO_LANDSCAPE",
         "9:16": "IMAGE_ASPECT_RATIO_PORTRAIT",
         "1:1": "IMAGE_ASPECT_RATIO_SQUARE",
+        "3:4": "IMAGE_ASPECT_RATIO_PORTRAIT_FOUR_THREE",
+        "4:3": "IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE",
         "IMAGE_ASPECT_RATIO_LANDSCAPE": "IMAGE_ASPECT_RATIO_LANDSCAPE",
         "IMAGE_ASPECT_RATIO_PORTRAIT": "IMAGE_ASPECT_RATIO_PORTRAIT",
         "IMAGE_ASPECT_RATIO_SQUARE": "IMAGE_ASPECT_RATIO_SQUARE",
+        "IMAGE_ASPECT_RATIO_PORTRAIT_FOUR_THREE": "IMAGE_ASPECT_RATIO_PORTRAIT_FOUR_THREE",
+        "IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE": "IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE",
     }
-    return mapping.get(aspect, "IMAGE_ASPECT_RATIO_LANDSCAPE")
+    return mapping.get(str(aspect).strip(), "IMAGE_ASPECT_RATIO_LANDSCAPE")
 
 
 def _normalize_video_aspect(aspect: str) -> str:
@@ -124,6 +128,7 @@ async def generate_video(payload: VideoGenerationRequest):
         "start_media_id": payload.start_media_id,
         "end_media_id": payload.end_media_id,
         "reference_media_ids": payload.reference_media_ids,
+        "model": payload.model or payload.quality,
         "quality": payload.quality,
     }
 
