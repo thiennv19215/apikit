@@ -216,6 +216,62 @@
       color: var(--red);
     }
 
+    .server-bar {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      padding: 8px 12px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+    }
+    .server-status-line {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 10px;
+    }
+    .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--muted);
+      flex-shrink: 0;
+    }
+    .dot.connected { background: var(--green); }
+    .dot.disconnected { background: var(--red); }
+    .server-input-line {
+      display: flex;
+      gap: 4px;
+    }
+    .server-input {
+      flex: 1;
+      padding: 4px 6px;
+      font-family: var(--font);
+      font-size: 9px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      color: var(--text);
+    }
+    .btn-sm {
+      padding: 3px 8px;
+      font-family: var(--font);
+      font-size: 9px;
+      font-weight: 600;
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      background: var(--card);
+      color: var(--text);
+      cursor: pointer;
+    }
+    .btn-sm:hover {
+      background: var(--accent-dim);
+      color: #fff;
+    }
+    .btn-presets {
+      display: flex;
+      gap: 4px;
+    }
     .footer {
       padding: 8px 12px;
       border-top: 1px solid var(--border);
@@ -232,6 +288,21 @@
     <div class="header-title"><span>Flow Kit</span> Extension</div>
     <button id="btn-panel">Side Panel</button>
   </header>
+
+  <div class="server-bar">
+    <div class="server-status-line">
+      <span class="dot disconnected" id="server-dot"></span>
+      <span id="server-status-label">Checking server...</span>
+    </div>
+    <div class="server-input-line">
+      <input type="text" id="server-url-input" class="server-input" placeholder="wss://..." spellcheck="false" />
+      <button id="btn-save-server" class="btn-sm">Save</button>
+    </div>
+    <div class="btn-presets">
+      <button id="preset-cf" class="btn-sm">Cloudflare</button>
+      <button id="preset-local" class="btn-sm">Local (9222)</button>
+    </div>
+  </div>
 
   <div class="log-header">
     Recent Requests

@@ -136,3 +136,69 @@ chrome.runtime.sendMessage({ type: 'REQUEST_LOG' }, (data) => {
   if (chrome.runtime.lastError) return;
   if (data && data.log) renderLog(data.log);
 });
+
+// ─── Server URL & Status ────────────────────────────────────
+const dotEl = document.getElementById('server-dot');
+const statusLabel = document.getElementById('server-status-label');
+const urlInput = document.getElementById('server-url-input');
+const saveBtn = document.getElementById('btn-save-server');
+const cfBtn = document.getElementById('preset-cf');
+const localBtn = document.getElementById('preset-local');
+
+function updateServerStatus() {
+  chrome.runtime.sendMessage({ type: 'STATUS' }, (res) => {
+    if (chrome.runtime.lastError || !res) {
+      if (dotEl) dotEl.className = 'dot disconnected';
+      if (statusLabel) statusLabel.textContent = 'Disconnected';
+      return;
+    }
+    if (dotEl) {
+      dotEl.className = res.connected ? 'dot connected' : 'dot disconnected';
+    }
+    if (statusLabel) {
+      statusLabel.textContent = res.connected ? 'Connected to Agent' : 'Connecting / Offline';
+    }
+    if (urlInput && !urlInput.dataset.modified && res.agentWsUrl) {
+      urlInput.value = res.agentWsUrl;
+    }
+  });
+}
+
+if (urlInput) {
+  urlInput.addEventListener('input', () => {
+    urlInput.dataset.modified = 'true';
+  });
+}
+
+function saveUrl(url) {
+  if (!url) return;
+  chrome.runtime.sendMessage({ type: 'SET_WS_URL', url }, (res) => {
+    if (urlInput) {
+      urlInput.value = url;
+      delete urlInput.dataset.modified;
+    }
+    updateServerStatus();
+  });
+}
+
+if (saveBtn) {
+  saveBtn.addEventListener('click', () => {
+    saveUrl(urlInput.value.trim());
+  });
+}
+
+if (cfBtn) {
+  cfBtn.addEventListener('click', () => {
+    saveUrl('wss://api.shopcongngheso5.io.vn/ws');
+  });
+}
+
+if (localBtn) {
+  localBtn.addEventListener('click', () => {
+    saveUrl('ws://127.0.0.1:9222');
+  });
+}
+
+updateServerStatus();
+setInterval(updateServerStatus, 2500);
+

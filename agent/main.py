@@ -60,6 +60,28 @@ async def ws_handler(websocket):
         logger.info("Extension disconnected")
 
 
+class FastAPIWebSocketAdapter:
+    """Wraps a FastAPI/Starlette WebSocket to match websockets protocol interface."""
+    def __init__(self, ws: WebSocket):
+        self._ws = ws
+
+    @property
+    def remote_address(self):
+        client = getattr(self._ws, "client", None)
+        return (client.host, client.port) if client else ("cloudflare_proxy", 0)
+
+    async def send(self, data: str):
+        await self._ws.send_text(data)
+
+    async def __aiter__(self):
+        try:
+            while True:
+                msg = await self._ws.receive_text()
+                yield msg
+        except WebSocketDisconnect:
+            return
+
+
 async def run_ws_server():
     """Run WebSocket server for extension connections."""
     async with websockets.serve(ws_handler, WS_HOST, WS_PORT):
@@ -175,6 +197,13 @@ async def health():
         "extension_connected": client.connected,
         "ws": client.ws_stats,
     }
+
+@app.websocket("/ws")
+async def extension_ws_fastapi(websocket: WebSocket):
+    """WebSocket endpoint for Chrome extension connecting over HTTP / Cloudflare Tunnel."""
+    await websocket.accept()
+    adapter = FastAPIWebSocketAdapter(websocket)
+    await ws_handler(adapter)
 
 
 # ─── Dashboard WebSocket ──────────────────────────────────────

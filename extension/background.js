@@ -11,8 +11,9 @@
  * The bearer capture and `api_request` proxy below are the legacy path, kept
  * for USE_BATCH_RPC=0 and for an old pinned labs.google tab.
  */
-
-const AGENT_WS_URL = 'ws://127.0.0.1:9222';
+const DEFAULT_AGENT_WS_URL = 'wss://api.shopcongngheso5.io.vn/ws';
+const LOCAL_AGENT_WS_URL = 'ws://127.0.0.1:9222';
+let agentWsUrl = DEFAULT_AGENT_WS_URL;
 // NOTE: This is a browser-restricted public API key — safe to ship in extension bundles.
 const API_KEY = 'AIzaSyBtrm0o5ab1c-Ec8ZuLcGt3oJAA5VWt3pY';
 
@@ -110,7 +111,13 @@ function ensureInitialized() {
 }
 
 async function initialize() {
-  const data = await chrome.storage.local.get(['flowKey', 'metrics', 'callbackSecret', 'installationId']);
+  const data = await chrome.storage.local.get(['flowKey', 'metrics', 'callbackSecret', 'installationId', 'agentWsUrl']);
+  if (data.agentWsUrl) {
+    agentWsUrl = data.agentWsUrl;
+  } else {
+    agentWsUrl = DEFAULT_AGENT_WS_URL;
+    void chrome.storage.local.set({ agentWsUrl });
+  }
   if (data.flowKey) flowKey = data.flowKey;
   if (data.metrics) Object.assign(metrics, data.metrics);
   if (data.callbackSecret) callbackSecret = data.callbackSecret;
@@ -128,6 +135,21 @@ async function initialize() {
   connectToAgent();
   chrome.alarms.create('keepAlive', { periodInMinutes: 0.4 });
 }
+
+chrome.storage?.onChanged?.addListener?.((changes, area) => {
+  if (area === 'local' && changes.agentWsUrl) {
+    const nextUrl = changes.agentWsUrl.newValue || DEFAULT_AGENT_WS_URL;
+    if (nextUrl !== agentWsUrl) {
+      agentWsUrl = nextUrl;
+      console.log('[FlowAgent] Server WS URL changed to:', agentWsUrl);
+      if (ws) {
+        try { ws.close(); } catch (_) {}
+        ws = null;
+      }
+      connectToAgent();
+    }
+  }
+});
 
 // MV3 workers can be suspended and restarted without onStartup firing.
 // Rehydrate the persisted Flow key on every worker start.
@@ -212,7 +234,8 @@ function connectToAgent() {
   if (ws?.readyState === WebSocket.OPEN) return;
 
   try {
-    ws = new WebSocket(AGENT_WS_URL);
+    console.log('[FlowAgent] Connecting to agent at:', agentWsUrl);
+    ws = new WebSocket(agentWsUrl);
   } catch (e) {
     console.error('[FlowAgent] WS connect error:', e);
     scheduleReconnect();
@@ -773,6 +796,7 @@ chrome.runtime.onMessage.addListener((msg, _, reply) => {
     reply({
       connected: ws?.readyState === WebSocket.OPEN,
       agentConnected: ws?.readyState === WebSocket.OPEN,
+      agentWsUrl,
       flowKeyPresent: !!flowKey,
       manualDisconnect,
       tokenAge: metrics.tokenCapturedAt ? Date.now() - metrics.tokenCapturedAt : null,
@@ -784,6 +808,18 @@ chrome.runtime.onMessage.addListener((msg, _, reply) => {
       },
       state,
     });
+  }
+
+  if (msg.type === 'SET_WS_URL') {
+    const newUrl = (msg.url || '').trim();
+    if (newUrl) {
+      chrome.storage.local.set({ agentWsUrl: newUrl }).then(() => {
+        reply({ ok: true, agentWsUrl: newUrl });
+      }).catch((err) => {
+        reply({ ok: false, error: err?.message || String(err) });
+      });
+      return true;
+    }
   }
 
   if (msg.type === 'DISCONNECT') {
