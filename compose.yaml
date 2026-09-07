@@ -1,0 +1,18 @@
+services:
+  apikit:
+    build: .
+    container_name: apikit-server
+    restart: unless-stopped
+    ports:
+      - "8100:8100"
+      - "9222:9222"
+    volumes:
+      - apikit_data:/app/data
+    environment:
+      - API_HOST=0.0.0.0
+      - API_PORT=8100
+      - WS_HOST=0.0.0.0
+      - WS_PORT=9222
+
+volumes:
+  apikit_data:
