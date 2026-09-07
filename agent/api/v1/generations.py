@@ -5,14 +5,17 @@ import logging
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Response, status
+from fastapi.responses import JSONResponse
 
 from agent.api.v1.schemas import (
     GeneratedMedia,
     ImageGenerationRequest,
     ImageUploadRequest,
     ImageUploadResponse,
+    Job,
     JobError,
+    JobMetadata,
     JobsResponse,
     JobStatusRequest,
     VideoGenerationRequest,
@@ -39,7 +42,7 @@ def _normalize_image_aspect(aspect: str) -> str:
         "IMAGE_ASPECT_RATIO_PORTRAIT_FOUR_THREE": "IMAGE_ASPECT_RATIO_PORTRAIT_FOUR_THREE",
         "IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE": "IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE",
     }
-    return mapping.get(str(aspect).strip(), "IMAGE_ASPECT_RATIO_LANDSCAPE")
+    return mapping.get(str(aspect).strip(), "IMAGE_ASPECT_RATIO_PORTRAIT")
 
 
 def _normalize_video_aspect(aspect: str) -> str:
@@ -50,6 +53,110 @@ def _normalize_video_aspect(aspect: str) -> str:
         "VIDEO_ASPECT_RATIO_PORTRAIT": "VIDEO_ASPECT_RATIO_PORTRAIT",
     }
     return mapping.get(aspect, "VIDEO_ASPECT_RATIO_PORTRAIT")
+
+
+def _build_job_item(req: dict) -> Job:
+    jid = req["id"]
+    raw_status = req.get("status", "PENDING")
+    status_map = {
+        "PENDING": "queued",
+        "PROCESSING": "running",
+        "COMPLETED": "complete",
+        "FAILED": "failed",
+    }
+    job_status = status_map.get(raw_status, "queued")
+    is_video = "VIDEO" in req.get("type", "")
+    job_type = "video" if is_video else "image"
+    generation_type = job_type
+    project_id = None
+    if req.get("payload_json"):
+        try:
+            pj = json.loads(req["payload_json"])
+            if pj.get("type"):
+                generation_type = pj["type"]
+            if pj.get("project_id"):
+                project_id = pj["project_id"]
+        except Exception:
+            pass
+
+    media_items: list[GeneratedMedia] = []
+    if req.get("output_url"):
+        media_items.append(
+            GeneratedMedia(
+                id=req.get("media_id") or jid,
+                type=job_type,
+                url=req["output_url"],
+                media_id=req.get("media_id"),
+            )
+        )
+
+    job_error: JobError | None = None
+    if raw_status == "FAILED" and req.get("error_message"):
+        job_error = JobError(
+            code="GENERATION_FAILED",
+            message=req["error_message"],
+            details=req.get("error_message"),
+        )
+
+    return Job(
+        id=jid,
+        project_id=project_id,
+        routing_scope=None,
+        provider="google_flow",
+        type=job_type,
+        generation_type=generation_type,
+        status=job_status,
+        media=media_items,
+        error=job_error,
+        installation_id=req.get("installation_id"),
+    )
+
+
+async def _resolve_jobs_response(job_ids: list[str]) -> JobsResponse:
+    jobs: list[Job] = []
+    counts: dict[str, int] = {"queued": 0, "running": 0, "complete": 0, "failed": 0}
+
+    for jid in job_ids:
+        req = await crud.get_request(jid)
+        if req:
+            item = _build_job_item(req)
+            jobs.append(item)
+            if item.status in counts:
+                counts[item.status] += 1
+        else:
+            item = Job(
+                id=jid,
+                provider="google_flow",
+                type="image",
+                generation_type="image",
+                status="failed",
+                error=JobError(
+                    code="JOB_NOT_FOUND",
+                    message=f"Job {jid} not found.",
+                ),
+            )
+            jobs.append(item)
+            counts["failed"] += 1
+
+    done = all(j.status in ("complete", "failed") for j in jobs)
+    metadata = JobMetadata(
+        counts=counts,
+        done=done,
+        poll_after_seconds=None if done else 10,
+    )
+
+    first_job = jobs[0] if jobs else None
+    return JobsResponse(
+        jobs=jobs,
+        metadata=metadata,
+        job_id=first_job.id if first_job else None,
+        type=first_job.type if first_job else None,
+        generation_type=first_job.generation_type if first_job else None,
+        status=first_job.status if first_job else None,
+        media=first_job.media if first_job else [],
+        error=first_job.error if first_job else None,
+        installation_id=first_job.installation_id if first_job else None,
+    )
 
 
 @router.post("/v1/media", response_model=ImageUploadResponse)
@@ -71,7 +178,21 @@ async def upload_image(payload: ImageUploadRequest):
     if not media_id:
         raise HTTPException(status_code=502, detail="Failed to retrieve uploaded media ID")
 
-    return ImageUploadResponse(media_id=media_id, file_name=payload.file_name)
+    response_data = {
+        "media_id": media_id,
+        "file_name": payload.file_name,
+        "media": {
+            "name": media_id,
+            "projectId": client.active_project_id or "",
+        },
+    }
+    return JSONResponse(
+        content=response_data,
+        headers={
+            "X-Flow-Project-Id": client.active_project_id or "",
+            "X-Flow-Media-Cache-Hits": "0",
+        },
+    )
 
 
 @router.post("/v1/images/generations", response_model=JobsResponse, status_code=status.HTTP_202_ACCEPTED)
@@ -87,6 +208,8 @@ async def generate_image(payload: ImageGenerationRequest):
         "input_images": [img.model_dump() for img in (payload.input_images or [])],
         "model": payload.model,
         "count": payload.count,
+        "project_id": payload.project_id,
+        "reference_media_ids": payload.reference_media_ids,
     }
 
     db = await get_db()
@@ -101,12 +224,7 @@ async def generate_image(payload: ImageGenerationRequest):
         await db.commit()
 
     logger.info("v1 Client API queued Image Job %s (orientation=%s)", job_id, orientation)
-    return JobsResponse(
-        job_id=job_id,
-        type="image",
-        generation_type="image",
-        status="queued",
-    )
+    return await _resolve_jobs_response([job_id])
 
 
 @router.post("/v1/videos/generations", response_model=JobsResponse, status_code=status.HTTP_202_ACCEPTED)
@@ -125,11 +243,13 @@ async def generate_video(payload: VideoGenerationRequest):
         "input_images": [img.model_dump() for img in payload.input_images],
         "aspect_ratio": aspect,
         "duration_seconds": payload.duration_seconds,
+        "project_id": payload.project_id,
         "start_media_id": payload.start_media_id,
         "end_media_id": payload.end_media_id,
         "reference_media_ids": payload.reference_media_ids,
         "model": payload.model or payload.quality,
         "quality": payload.quality,
+        "dialogue": payload.dialogue,
     }
 
     db = await get_db()
@@ -144,82 +264,25 @@ async def generate_video(payload: VideoGenerationRequest):
         await db.commit()
 
     logger.info("v1 Client API queued Video Job %s (type=%s, orientation=%s)", job_id, payload.type, orientation)
-    return JobsResponse(
-        job_id=job_id,
-        type="video",
-        generation_type=payload.type,
-        status="queued",
-    )
-
-
-async def _resolve_job_response(job_id: str) -> JobsResponse:
-    req = await crud.get_request(job_id)
-    if not req:
-        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
-
-    raw_status = req.get("status", "PENDING")
-    status_map = {
-        "PENDING": "queued",
-        "PROCESSING": "running",
-        "COMPLETED": "complete",
-        "FAILED": "failed",
-    }
-    job_status = status_map.get(raw_status, "queued")
-
-    is_video = "VIDEO" in req.get("type", "")
-    job_type = "video" if is_video else "image"
-
-    # Extract generation_type from payload if available
-    generation_type = job_type
-    if req.get("payload_json"):
-        try:
-            pj = json.loads(req["payload_json"])
-            if pj.get("type"):
-                generation_type = pj["type"]
-        except Exception:
-            pass
-
-    media_items: list[GeneratedMedia] = []
-    if req.get("output_url"):
-        media_items.append(
-            GeneratedMedia(
-                type=job_type,
-                url=req["output_url"],
-                media_id=req.get("media_id"),
-            )
-        )
-
-    job_error: JobError | None = None
-    if raw_status == "FAILED" and req.get("error_message"):
-        job_error = JobError(
-            code="GENERATION_FAILED",
-            message=req["error_message"],
-        )
-
-    return JobsResponse(
-        job_id=job_id,
-        type=job_type,
-        generation_type=generation_type,
-        status=job_status,
-        media=media_items,
-        error=job_error,
-        installation_id=req.get("installation_id"),
-    )
+    return await _resolve_jobs_response([job_id])
 
 
 @router.post("/v1/jobs/status", response_model=JobsResponse)
 async def get_job_status(payload: JobStatusRequest):
-    """Query job status by job_id (POST)."""
-    return await _resolve_job_response(payload.job_id)
+    """Query job status by job_ids (POST matching FlowProviderAPI contract)."""
+    ids = payload.job_ids or ([payload.job_id] if payload.job_id else [])
+    if not ids:
+        raise HTTPException(status_code=422, detail="Either job_ids or job_id must be provided")
+    return await _resolve_jobs_response(ids)
 
 
 @router.get("/v1/jobs/{job_id}", response_model=JobsResponse)
 async def get_job_by_id(job_id: str):
     """Query job status by job_id (GET)."""
-    return await _resolve_job_response(job_id)
+    return await _resolve_jobs_response([job_id])
 
 
 @router.get("/v1/jobs/status/{job_id}", response_model=JobsResponse)
 async def get_job_status_by_id(job_id: str):
     """Query job status by job_id (GET /v1/jobs/status/{job_id})."""
-    return await _resolve_job_response(job_id)
+    return await _resolve_jobs_response([job_id])

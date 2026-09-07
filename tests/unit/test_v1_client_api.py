@@ -221,3 +221,62 @@ async def test_dispatch_client_v1_auto_uploads_base64():
     # Verified: generated images using uploaded media ID as reference
     assert len(ops.generated_images) == 1
     assert "media-uuid-1234" in ops.generated_images[0]["refs"]
+
+
+@pytest.mark.asyncio
+async def test_health_endpoints_parity():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        # GET /health/live
+        live_resp = await ac.get("/health/live")
+        assert live_resp.status_code == 200
+        assert live_resp.json() == {"status": "ok"}
+
+        # GET /health/ready (waiting_for_provider when no ext connected)
+        ready_resp = await ac.get("/health/ready")
+        assert ready_resp.status_code in (200, 503)
+        ready_data = ready_resp.json()
+        assert "status" in ready_data
+        assert "job_queue_capacity" in ready_data
+
+        # GET /api/health
+        api_h_resp = await ac.get("/api/health")
+        assert api_h_resp.status_code == 200
+        assert "ok" in api_h_resp.json()
+
+
+@pytest.mark.asyncio
+async def test_multi_job_status_and_character_reference_image():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        # Create character with reference image
+        char_resp = await ac.post("/v1/characters", json={
+            "name": "Sorceress",
+            "entity_type": "character",
+            "reference_media_ids": ["ref-media-777"]
+        })
+        assert char_resp.status_code == 201
+        char_id = char_resp.json()["id"]
+
+        # Queue character image generation
+        gen_resp = await ac.post(f"/v1/characters/{char_id}/images/generations", json={
+            "prompt": "Casting lightning spell",
+            "aspect_ratio": "16:9"
+        })
+        assert gen_resp.status_code == 202
+        body = gen_resp.json()
+        assert "jobs" in body
+        assert len(body["jobs"]) == 1
+        job_id = body["jobs"][0]["id"]
+        assert body["metadata"]["counts"]["queued"] >= 1
+
+        # Query batch job status
+        batch_resp = await ac.post("/v1/jobs/status", json={"job_ids": [job_id, "job_nonexistent"]})
+        assert batch_resp.status_code == 200
+        batch_data = batch_resp.json()
+        assert len(batch_data["jobs"]) == 2
+        assert batch_data["jobs"][0]["id"] == job_id
+        assert batch_data["jobs"][0]["status"] == "queued"
+        assert batch_data["jobs"][1]["status"] == "failed"
+        assert batch_data["jobs"][1]["error"]["code"] == "JOB_NOT_FOUND"
+

@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 
 import websockets
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from agent.config import API_HOST, API_PORT, WS_HOST, WS_PORT
@@ -202,7 +203,48 @@ async def health():
         "ws": client.ws_stats,
     }
 
+
+def _get_provider_status_dict():
+    client = get_flow_client()
+    connected = client.connected
+    active_accounts = len(client._accounts) if hasattr(client, "_accounts") and client._accounts else (1 if connected else 0)
+    controller = get_worker_controller()
+    active_count = controller.active_count if controller else 0
+    capacity = 200
+    status_str = "ready" if connected else "waiting_for_provider"
+    return {
+        "status": status_str,
+        "project_store": "ready",
+        "provider_accounts": active_accounts,
+        "video_lite_ready_accounts": active_accounts,
+        "jobs": {"queued": 0, "dispatching": active_count, "running": active_count},
+        "active_jobs": active_count,
+        "job_queue_capacity": capacity,
+        "job_queue_remaining": max(0, capacity - active_count),
+    }
+
+
+@app.get("/health/live", include_in_schema=False)
+async def health_live():
+    return {"status": "ok"}
+
+
+@app.get("/health/ready", include_in_schema=False)
+async def health_ready():
+    status_info = _get_provider_status_dict()
+    if status_info["status"] != "ready":
+        return JSONResponse(status_code=503, content=status_info)
+    return status_info
+
+
+@app.get("/api/health", include_in_schema=False)
+async def api_health():
+    status_info = _get_provider_status_dict()
+    return {"ok": status_info["status"] != "waiting_for_provider", **status_info}
+
+
 @app.websocket("/ws")
+@app.websocket("/api/extensions/ws")
 async def extension_ws_fastapi(websocket: WebSocket):
     """WebSocket endpoint for Chrome extension connecting over HTTP / Cloudflare Tunnel."""
     await websocket.accept()

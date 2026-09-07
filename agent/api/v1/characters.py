@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from typing import Optional
 
 from fastapi import APIRouter, HTTPException, status
+from fastapi.responses import RedirectResponse
 
+from agent.api.v1.generations import _resolve_jobs_response
 from agent.api.v1.schemas import (
     CharacterCreateRequest,
     CharacterImageGenerationRequest,
@@ -25,12 +26,19 @@ router = APIRouter(prefix="/v1/characters", tags=["Client API v1 Characters"])
 
 
 def _as_character_response(row: dict) -> CharacterResponse:
+    mid = row.get("media_id")
+    ref_ids = [mid] if mid else []
     return CharacterResponse(
         id=row["id"],
         name=row["name"],
+        entity_type=row.get("entity_type") or "character",
         description=row.get("description") or "",
         image_prompt=row.get("image_prompt") or "",
-        media_id=row.get("media_id"),
+        voice_description=row.get("voice_description"),
+        image_model=row.get("image_model") or "pro",
+        aspect_ratio=row.get("aspect_ratio"),
+        reference_media_ids=ref_ids,
+        media_id=mid,
         reference_image_url=row.get("reference_image_url"),
         created_at=row.get("created_at"),
         updated_at=row.get("updated_at"),
@@ -53,6 +61,9 @@ async def create_character(body: CharacterCreateRequest):
             )
             if not res.get("error"):
                 media_id = res.get("_mediaId") or res.get("data", {}).get("media", {}).get("name")
+
+    if not media_id and body.reference_media_ids:
+        media_id = body.reference_media_ids[0]
 
     raw_type = (body.entity_type or "character").lower()
     valid_types = {'character', 'location', 'creature', 'visual_asset', 'generic_troop', 'faction'}
@@ -95,6 +106,11 @@ async def update_character(character_id: str, body: CharacterUpdateRequest):
             raise HTTPException(status_code=404, detail="Character not found")
         return _as_character_response(char)
 
+    if updates.get("reference_media_ids"):
+        updates["media_id"] = updates["reference_media_ids"][0]
+    updates.pop("reference_media_ids", None)
+    updates.pop("input_images", None)
+
     updated = await crud.update_character(character_id, **updates)
     if not updated:
         raise HTTPException(status_code=404, detail="Character not found")
@@ -109,6 +125,18 @@ async def delete_character(character_id: str):
         raise HTTPException(status_code=404, detail="Character not found")
 
 
+@router.get("/{character_id}/reference-images/{index}")
+async def get_reference_image(character_id: str, index: int):
+    """Retrieve character reference image by index (FlowProviderAPI contract)."""
+    char = await crud.get_character(character_id)
+    if not char:
+        raise HTTPException(status_code=404, detail="Character not found")
+    ref_url = char.get("reference_image_url")
+    if index != 0 or not ref_url:
+        raise HTTPException(status_code=404, detail="Reference image not found")
+    return RedirectResponse(url=ref_url, status_code=307)
+
+
 @router.post("/{character_id}/images/generations", response_model=JobsResponse, status_code=status.HTTP_202_ACCEPTED)
 async def generate_character_image(character_id: str, body: CharacterImageGenerationRequest):
     """Generate image of a character."""
@@ -120,11 +148,18 @@ async def generate_character_image(character_id: str, body: CharacterImageGenera
     aspect = "IMAGE_ASPECT_RATIO_LANDSCAPE" if "16:9" in body.aspect_ratio else "IMAGE_ASPECT_RATIO_PORTRAIT"
     orientation = "HORIZONTAL" if "LANDSCAPE" in aspect else "VERTICAL"
 
+    ref_media_ids = list(body.reference_media_ids) if body.reference_media_ids else []
+    if not ref_media_ids and char.get("media_id"):
+        ref_media_ids = [char["media_id"]]
+
     payload_dict = {
         "prompt": body.prompt,
         "aspect_ratio": aspect,
         "character_id": character_id,
-        "character_media_ids": [char["media_id"]] if char.get("media_id") else [],
+        "character_media_ids": ref_media_ids,
+        "model": body.model,
+        "input_images": [img.model_dump() for img in (body.input_images or [])],
+        "project_id": body.project_id,
     }
 
     db = await get_db()
@@ -138,12 +173,12 @@ async def generate_character_image(character_id: str, body: CharacterImageGenera
         )
         await db.commit()
 
-    return JobsResponse(
-        job_id=job_id,
-        type="image",
-        generation_type="character_image",
-        status="queued",
-    )
+    return await _resolve_jobs_response([job_id])
+
+
+@router.post("/{character_id}/images", response_model=JobsResponse, status_code=status.HTTP_202_ACCEPTED, include_in_schema=False)
+async def generate_character_image_alias(character_id: str, body: CharacterImageGenerationRequest):
+    return await generate_character_image(character_id, body)
 
 
 @router.post("/{character_id}/videos/generations", response_model=JobsResponse, status_code=status.HTTP_202_ACCEPTED)
@@ -164,6 +199,8 @@ async def generate_character_video(character_id: str, body: CharacterVideoGenera
         "duration_seconds": body.duration_seconds,
         "character_id": character_id,
         "reference_media_ids": [char["media_id"]] if char.get("media_id") else [],
+        "dialogue": body.dialogue,
+        "project_id": body.project_id,
     }
 
     db = await get_db()
@@ -177,9 +214,9 @@ async def generate_character_video(character_id: str, body: CharacterVideoGenera
         )
         await db.commit()
 
-    return JobsResponse(
-        job_id=job_id,
-        type="video",
-        generation_type="character_video",
-        status="queued",
-    )
+    return await _resolve_jobs_response([job_id])
+
+
+@router.post("/{character_id}/videos", response_model=JobsResponse, status_code=status.HTTP_202_ACCEPTED, include_in_schema=False)
+async def generate_character_video_alias(character_id: str, body: CharacterVideoGenerationRequest):
+    return await generate_character_video(character_id, body)
