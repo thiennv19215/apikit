@@ -613,8 +613,8 @@ async def _handle_failure(rid: str, req: dict, result: dict, retry_after: dict =
         retry = req.get("retry_count", 0) + 1
         if retry < 4:
             await crud.update_request(rid, status="PENDING", retry_count=retry, error_message=str(error_msg))
-            if deferred is not None:
-                deferred[rid] = time.time() + 3.0
+            if retry_after is not None:
+                retry_after[rid] = time.time() + 3.0
             logger.info("Request %s waiting for Flow project sync (retry %d/3 in 3s)", rid[:8], retry)
             return
         await crud.update_request(rid, status="FAILED", error_message=str(error_msg))
