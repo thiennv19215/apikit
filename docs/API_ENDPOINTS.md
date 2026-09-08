@@ -94,16 +94,16 @@ Các endpoint này nhận yêu cầu bất đồng bộ (Asynchronous), trả v�
 - **Hỗ trợ Alias:** `"LANDSCAPE"`, `"PORTRAIT"`, `"SQUARE"`, `"HORIZONTAL"`, `"VERTICAL"`, `"16:9"`, `"9:16"`, `"1:1"`, `"3:4"`, `"4:3"`.
 
 #### 1.3.2. Sinh Video: `POST /v1/videos/generations` (Omni Flash Mode)
-Hệ thống sử dụng model **Gemini Omni Flash** (`veo_3_1_i2v_lite` wire model). Mọi alias `"omni_flash"`, `"omni"`, `"flash"`, `"lite"` đều tự động map về Omni Flash.
+Hệ thống sử dụng **Gemini Omni Flash** độc quyền trên Google Flow (tuyệt đối không dùng Veo), hỗ trợ cả 3 chế độ qua Batch RPC:
 
-**Request Body (Image-to-Video - I2V):**
+**1. Image-to-Video (First Frame - RPC `eb1hJf`):**
 ```json
 {
   "prompt": "Samurai draws katana with lightning aura, camera zooms in",
-  "mode": "omni_flash",
+  "model": "omni_flash",
   "generation_type": "image_to_video",
-  "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
-  "duration_seconds": 8,
+  "aspect_ratio": "9:16",
+  "duration_seconds": 4,
   "input_images": [
     {
       "image_base64": "iVBORw0KGgoAAA...",
@@ -113,14 +113,38 @@ Hệ thống sử dụng model **Gemini Omni Flash** (`veo_3_1_i2v_lite` wire mo
   ]
 }
 ```
-**Request Body (Reference-to-Video - R2V / 1-7 Reference Images):**
+
+**2. Start + End Frame (First & Last Frame - RPC `nprQif`):**
 ```json
 {
-  "prompt": "Characters interact inside futuristic cockpit, dramatic blue lights",
-  "mode": "omni_flash",
+  "prompt": "Smooth cinematic camera transition from girl in white dress to white tiger in bamboo forest",
+  "model": "omni_flash",
+  "generation_type": "start_end",
+  "aspect_ratio": "9:16",
+  "duration_seconds": 4,
+  "input_images": [
+    {
+      "image_base64": "iVBORw0KGgoAAA...",
+      "mime_type": "image/jpeg",
+      "role": "start_frame"
+    },
+    {
+      "image_base64": "iVBORw0KGgoAAA...",
+      "mime_type": "image/jpeg",
+      "role": "end_frame"
+    }
+  ]
+}
+```
+
+**3. Reference-to-Video (R2V - RPC `MZZa6b`):**
+```json
+{
+  "prompt": "White tiger walking peacefully beside the girl in ancient bamboo forest",
+  "model": "omni_flash",
   "generation_type": "reference_to_video",
-  "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
-  "duration_seconds": 8,
+  "aspect_ratio": "9:16",
+  "duration_seconds": 4,
   "input_images": [
     {
       "image_base64": "iVBORw0KGgoAAA...",

@@ -1,157 +1,201 @@
 # API v1 dành cho client
 
-Base URL: `https://apikit.shopcongngheso5.io.vn` (cần xác minh deployment).
-Local: `http://127.0.0.1:8100`.
-Client gửi ảnh Base64 ngay trong request. Server xử lý việc đưa ảnh lên provider
-nội bộ; client không cần gọi một endpoint riêng cho bước này.
+Base URL: `https://apikit.shopcongngheso5.io.vn`
+Local Dev: `http://127.0.0.1:8100`
 
-## Endpoint client
+Client gửi ảnh Base64 ngay trong request hoặc truyền `media_id` có sẵn. Server tự động xử lý upload lên Google Flow, quản lý cache ảnh tránh upload trùng lặp, tự động cân bằng tải và phân bổ profile tài khoản.
 
-| Method | Endpoint | Kết quả |
+---
+
+## 1. Danh sách Endpoint Client
+
+| Method | Endpoint | Mô tả |
 |---|---|---|
-| GET | `/v1/health` | Trạng thái bảo trì và khả năng nhận tác vụ |
-| POST | `/v1/images/generations` | 202, job ảnh |
-| POST | `/v1/videos/generations` | Video Omni: chưa hoàn tất tích hợp, xem bên dưới |
-| POST | `/v1/jobs/status` | Trạng thái nhiều job |
-| GET | `/v1/jobs/{job_id}` | Trạng thái một job |
-| GET | `/v1/jobs/status/{job_id}` | Alias trạng thái |
-| GET | `/v1/jobs/{job_id}/executions` | Lịch sử thực thi; 404 nếu không tồn tại |
-| POST, GET | `/v1/characters` | 201 tạo / 200 danh sách |
-| GET, PATCH, DELETE | `/v1/characters/{id}` | 200 đọc/sửa, 204 xóa; 404 nếu không tồn tại |
-| GET | `/v1/characters/{id}/reference-images/{index}` | 307 khi có URL ở index 0; nếu không 404 |
-| POST | `/v1/characters/{id}/images/generations` | 202; alias `/images` |
-| POST | `/v1/characters/{id}/videos/generations` | Cùng giới hạn video Omni; alias `/videos` |
+| GET | `/v1/health` | Kiểm tra trạng thái hệ thống, khả năng nhận tác vụ và danh sách capabilities |
+| POST | `/v1/images/generations` | 202 Accepted, tạo tác vụ sinh ảnh (Nano Banana Pro / Banana 2) |
+| POST | `/v1/videos/generations` | 202 Accepted, tạo tác vụ sinh video Gemini Omni Flash (First frame, Start+End, R2V) |
+| POST | `/v1/jobs/status` | Tra cứu trạng thái nhiều job |
+| GET | `/v1/jobs/{job_id}` | Tra cứu trạng thái một job |
+| GET | `/v1/jobs/status/{job_id}` | Alias tra cứu trạng thái |
+| GET | `/v1/jobs/{job_id}/executions` | Lịch sử audit thực thi; 404 nếu không tồn tại |
+| POST, GET | `/v1/characters` | 201 tạo nhân vật / 200 lấy danh sách |
+| GET, PATCH, DELETE | `/v1/characters/{id}` | 200 đọc, sửa, 204 xóa nhân vật |
+| POST | `/v1/characters/{id}/images/generations` | 202; sinh ảnh nhân vật |
+| POST | `/v1/characters/{id}/videos/generations` | 202; sinh video nhân vật |
 
-## Kiểm tra backend trước khi gửi tác vụ
+---
 
-`GET /v1/health` không tạo job. Response luôn có `Cache-Control: no-store`.
+## 2. Kiểm tra trạng thái hệ thống (`GET /v1/health`)
 
-| HTTP / status | Client xử lý |
-|---|---|
-| 200 / `ready` | Dành cho trạng thái đầy đủ khi các khả năng đã tích hợp |
-| 200 / `degraded` | Chỉ bật tính năng có `capabilities.*.available=true` |
-| 503 / `maintenance` | Hiển thị bảo trì, không gửi tác vụ mới; thử lại sau `Retry-After` |
-| 503 / `unavailable` | Backend/provider chưa sẵn sàng; không kết luận là bảo trì |
+Endpoint `GET /v1/health` không tạo job, response có header `Cache-Control: no-store`.
 
-Hiện video Omni chưa tích hợp xong nên khi ảnh sẵn sàng, status là `degraded`:
-
+Khi hệ thống sẵn sàng và extension Google Flow đã kết nối:
 ```json
 {
-  "status": "degraded",
+  "status": "ready",
   "maintenance": false,
   "accepting_requests": true,
-  "message": "Image generation is available; Omni Flash integration is not ready.",
+  "message": "Image and Omni Flash video generation are available.",
   "retry_after_seconds": null,
   "capabilities": {
     "image_generation": {"available": true, "reason": null},
-    "video_generation": {"available": false, "reason": "OMNI_INTEGRATION_PENDING"}
+    "video_generation": {"available": true, "reason": null},
+    "video_first_frame": {"available": true, "reason": null},
+    "video_start_end": {"available": true, "reason": null},
+    "video_reference": {"available": true, "reason": null}
   }
 }
 ```
 
-`accepting_requests=true` không có nghĩa mọi tính năng đều sẵn sàng; phải đọc
-capability của thao tác định dùng. Trạng thái provider chỉ là kiểm tra kết nối,
-không đảm bảo quota hoặc yêu cầu tiếp theo sẽ thành công.
+---
 
-Bảo trì trả `maintenance=true`, `accepting_requests=false`, hai capability false
-và `Retry-After: 60`. Lúc này request ghi/tạo mới trả 503; vẫn đọc và poll job cũ.
-Mất provider/backend trả `Retry-After: 10` và `maintenance=false`.
-Timeout, lỗi kết nối, proxy trả HTML hoặc server tắt: hiển thị không kết nối được,
-không suy ra bảo trì. Health không bảo đảm worker đã hoàn tất job đang chạy.
+## 3. Sinh Video: Gemini Omni Flash (`POST /v1/videos/generations`)
 
-## Tạo ảnh
+Tất cả các chế độ sinh video đều sử dụng chung endpoint `POST /v1/videos/generations`.
+Hệ thống **chỉ sử dụng Gemini Omni Flash** (tuyệt đối không dùng Veo) và tự động ánh xạ đúng Google Flow Batch RPC:
 
-`POST /v1/images/generations`
+| Chế độ | Google Batch RPC | Model Wire Key | Đầu vào |
+|---|---|---|---|
+| **1. First Frame** | `eb1hJf` | `abra_i2v_<duration>s` | 1 ảnh đầu (`start_media_id` hoặc role `start_frame`) |
+| **2. Start + End Frame** | `nprQif` | `omni_flash_i2v_<duration>s_first_last` | 2 ảnh (`start` + `end` media_id hoặc 2 ảnh role `start_frame` & `end_frame`) |
+| **3. Reference-to-Video (R2V)** | `MZZa6b` | `abra_r2v_<duration>s` | 1–7 ảnh tham chiếu (`reference_media_ids` hoặc role `reference`) |
 
-| Trường | Mặc định | Ý nghĩa |
-|---|---|---|
-| `prompt` | Bắt buộc | Nội dung ảnh |
-| `model` | `NANO_BANANA_PRO` | `NANO_BANANA_PRO` hoặc `NANO_BANANA_2` |
-| `image_model` | Không | Alias `model`; gửi cả hai khác nhau trả 422 |
-| `aspect_ratio` | Ngang | `16:9`, `9:16`, `1:1`, `3:4`, `4:3` hoặc enum tương ứng |
-| `input_images` | Không | Danh sách ảnh tham chiếu Base64 |
-| `count`, `variant_count` | `1` | Chưa hỗ trợ yêu cầu nhiều biến thể; giữ 1 |
+Thời lượng hỗ trợ: `4`, `6`, `8`, `10` giây (mặc định 8s). Tỉ lệ hỗ trợ: `9:16` (Portrait - mặc định) hoặc `16:9` (Landscape).
 
-Alias model không phân biệt hoa/thường: `pro`, `bananapro`, `banana_pro` →
-`NANO_BANANA_PRO`; `banana2`, `banana 2`, `banana_2`, `fast` → `NANO_BANANA_2`.
+---
 
+### Cách gọi 1: First Frame to Video (1 ảnh đầu)
+
+```bash
+curl -X POST https://apikit.shopcongngheso5.io.vn/v1/videos/generations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "The camera slowly pans forward as the girl smiles and waves",
+    "duration_seconds": 4,
+    "aspect_ratio": "9:16",
+    "model": "omni_flash",
+    "input_images": [
+      {
+        "image_base64": "<BASE64_ANH_DAU>",
+        "mime_type": "image/jpeg",
+        "role": "start_frame"
+      }
+    ]
+  }'
+```
+*(Nếu đã có `media_id` trên Google Flow, có thể truyền `"start_media_id": "<UUID>"` thay cho `input_images`)*.
+
+---
+
+### Cách gọi 2: Start + End Frame to Video (Ảnh đầu & Ảnh cuối)
+
+Dùng để tạo hoạt cảnh chuyển tiếp mượt mà (morph / camera dolly) giữa 2 khung hình chính xác.
+
+```bash
+curl -X POST https://apikit.shopcongngheso5.io.vn/v1/videos/generations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Smooth cinematic camera transition from Vietnamese girl in white Ao Dai to white tiger resting in bamboo forest",
+    "duration_seconds": 4,
+    "aspect_ratio": "9:16",
+    "model": "omni_flash",
+    "generation_type": "start_end",
+    "input_images": [
+      {
+        "image_base64": "<BASE64_ANH_DAU>",
+        "mime_type": "image/jpeg",
+        "role": "start_frame"
+      },
+      {
+        "image_base64": "<BASE64_ANH_CUOI>",
+        "mime_type": "image/jpeg",
+        "role": "end_frame"
+      }
+    ]
+  }'
+```
+*(Hoặc truyền `"start_media_id": "<UUID_DAU>"`, `"end_media_id": "<UUID_CUOI>"`)*.
+
+---
+
+### Cách gọi 3: Reference-to-Video (R2V - Nhiều ảnh tham chiếu)
+
+Dùng để kết hợp các nhân vật, đối tượng hoặc bối cảnh từ 2 hay nhiều ảnh tham chiếu vào cùng một video sống động.
+
+```bash
+curl -X POST https://apikit.shopcongngheso5.io.vn/v1/videos/generations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Cinematic handheld shot of white tiger walking peacefully beside the girl in ancient bamboo forest",
+    "duration_seconds": 4,
+    "aspect_ratio": "9:16",
+    "model": "omni_flash",
+    "generation_type": "reference_to_video",
+    "input_images": [
+      {
+        "image_base64": "<BASE64_ANH_HO>",
+        "mime_type": "image/jpeg",
+        "role": "reference"
+      },
+      {
+        "image_base64": "<BASE64_ANH_CO_GAI>",
+        "mime_type": "image/jpeg",
+        "role": "reference"
+      }
+    ]
+  }'
+```
+*(Hoặc truyền `"reference_media_ids": ["<UUID_1>", "<UUID_2>"]`)*.
+
+---
+
+## 4. Tra cứu trạng thái Job (`GET /v1/jobs/{job_id}`)
+
+Khi gửi request tạo video/ảnh thành công, server trả về **HTTP 202 Accepted** kèm `job_id`:
 ```json
 {
-  "prompt": "A quiet mountain lake at sunrise",
-  "model": "NANO_BANANA_2",
-  "aspect_ratio": "16:9",
-  "input_images": [{"image_base64": "<BASE64_IMAGE>", "mime_type": "image/png"}]
+  "jobs": [
+    {
+      "id": "job_8baa7d8f6a4141ec",
+      "status": "queued",
+      "type": "video",
+      "generation_type": "image_to_video",
+      "media": [],
+      "error": null
+    }
+  ],
+  "metadata": {
+    "poll_after_seconds": 10,
+    "done": false
+  }
 }
 ```
 
-`mime_type` mặc định `image/jpeg`. Bỏ `input_images` để tạo ảnh từ prompt.
-
-## Video: chỉ Omni Flash
-
-Contract client yêu cầu `model="omni_flash"`, không cung cấp lựa chọn model video khác.
-
-**First-frame đã tích hợp thực thi** qua batch RPC với model `abra_i2v_<duration>s`.
-Start–End và reference-to-video chưa có payload Flow batch được capture/kiểm chứng,
-nên backend trả lỗi rõ ràng (`OMNI_START_END_NOT_CAPTURED` hoặc
-`OMNI_R2V_NOT_CAPTURED`), tuyệt đối không đổi sang Veo hoặc bỏ ảnh đầu vào.
-
-| Chế độ | `generation_type` | Ảnh đầu vào |
-|---|---|---|
-| First frame (`abra_i2v`) | `image_to_video` | 1 ảnh role `start_frame` |
-| First + Last | `image_to_video` | 1 `start_frame` + 1 `end_frame` |
-| Reference-to-video (`abra_r2v`) | `reference_to_video` | 1–7 ảnh role `reference` |
-
-Module Omni có thời lượng 4/6/8/10 giây và tỷ lệ `16:9`/`9:16`.
-`generation_type` là tên ưu tiên, `type` là alias cũ; gửi hai giá trị khác nhau trả 422.
-Thoại mô tả trong `prompt`; chưa có công tắc `dialogue` hoạt động.
-
-Ví dụ First+Last (contract, hiện sẽ trả lỗi chưa-capture):
-
+Client thực hiện poll trạng thái qua `GET /v1/jobs/{job_id}`:
+- Khi đang xử lý: `"status": "running"`
+- Khi hoàn tất: `"status": "complete"`, `"media"` chứa danh sách file video kèm signed download URL:
 ```json
 {
-  "model": "omni_flash",
-  "generation_type": "image_to_video",
-  "prompt": "0-3s: Camera advances. 3-6s: Subject turns. 6-8s: Hold on final pose.",
-  "duration_seconds": 8,
-  "aspect_ratio": "16:9",
-  "input_images": [
-    {"image_base64": "<START_IMAGE>", "mime_type": "image/png", "role": "start_frame"},
-    {"image_base64": "<END_IMAGE>", "mime_type": "image/png", "role": "end_frame"}
-  ]
+  "jobs": [
+    {
+      "id": "job_8baa7d8f6a4141ec",
+      "status": "complete",
+      "type": "video",
+      "generation_type": "image_to_video",
+      "media": [
+        {
+          "id": "a6428121-16e8-4d81-882b-1467ad1b61ae",
+          "type": "video",
+          "url": "https://flow-content.google/video/a6428121-16e8-4d81-882b-1467ad1b61ae?Expires=...&Signature=...",
+          "media_id": "a6428121-16e8-4d81-882b-1467ad1b61ae"
+        }
+      ],
+      "error": null
+    }
+  ],
+  "metadata": {
+    "done": true
+  }
 }
 ```
-
-First frame: bỏ `end_frame`. R2V: đổi type thành `reference_to_video`, dùng 1–7
-ảnh role `reference`. Việc khai báo đủ trường chưa có nghĩa provider đã hỗ trợ.
-
-## Nhân vật
-
-Create nhận `name` bắt buộc; `description`, `image_prompt`, `voice_description`,
-`entity_type` (mặc định `character`) và `input_images` Base64. Hiện chỉ lưu một ảnh
-reference; kiểm tra response vì tạo nhân vật có thể thành công khi ảnh chưa có.
-
-PATCH hỗ trợ sửa tên, mô tả, image prompt, voice description và entity type;
-chưa hỗ trợ thay ảnh Base64 qua PATCH.
-
-Tạo ảnh nhân vật nhận `prompt`, `model`/`image_model`, `aspect_ratio`, `input_images`,
-`variant_count=1`. Tỷ lệ mặc định `16:9`; bỏ model thì dùng mặc định backend.
-Truyền model/aspect ở từng request generation; chúng chưa được lưu trong catalog.
-
-## Theo dõi kết quả
-
-1. Gửi request tạo ảnh, nhận HTTP 202 và `job_id`: chỉ xác nhận đã xếp hàng.
-2. Gọi `GET /v1/jobs/{job_id}` hoặc `POST /v1/jobs/status` với
-   `{"job_ids":["<JOB_ID>"]}`; cũng nhận `{"job_id":"<JOB_ID>"}`.
-3. Poll theo `metadata.poll_after_seconds`, thường 10 giây.
-4. `metadata.done=true` gồm cả thành công và thất bại; kiểm tra `jobs[].status`.
-5. Khi complete lấy `jobs[].media[].url`; khi failed đọc `jobs[].error`.
-
-Response có `jobs`, `metadata`. Trường ngoài cùng `job_id`, `status`, `type`,
-`generation_type`, `media`, `error` phản ánh job đầu tiên cho client cũ.
-Trạng thái: `queued`, `running`, `complete`, `failed`.
-Kích thước, thumbnail, thời lượng có thể null.
-
-Job không tồn tại: HTTP 200, failed/`JOB_NOT_FOUND`. Validation: 422 dạng `detail`.
-Lỗi generation thường là `GENERATION_FAILED`, chi tiết nằm trong message;
-trường retry mở rộng chưa phải phân loại hoàn chỉnh. Không tự gửi lại generation
-khi timeout nếu chưa kiểm tra trạng thái job cũ.
+- Khi lỗi: `"status": "failed"`, `"error": "thông báo lỗi chi tiết"`.

@@ -20,20 +20,18 @@ Expected state:
 
 Use `http://127.0.0.1:8100` when the caller runs on the FlowKit host. For a remote integration, set `FLOWKIT_BASE_URL` to the protected HTTPS reverse-proxy URL and allow only the required source IPs or private network. Do not expose Chrome, VNC/noVNC, the extension WebSocket, or port 8100 publicly.
 
-## Supported modes
-
-| Mode | Inputs | Endpoint | Internal model family |
-|---|---|---|---|
-| First frame to video | one uploaded start image | `POST /api/flow/generate-video` | `abra_i2v_<duration>s` |
-| First + Last frame to video | uploaded start and end images | `POST /api/flow/generate-video` | `abra_i2v_<duration>s` |
-| References to video | 1-7 uploaded reference images | `POST /api/flow/generate-video-omni` | `abra_r2v_<duration>s` |
+| Mode | Inputs | Endpoint | Google Batch RPC | Wire Model Key |
+|---|---|---|---|---|
+| First frame to video | 1 uploaded start image | `POST /v1/videos/generations` | `eb1hJf` | `abra_i2v_<duration>s` |
+| First + Last frame | uploaded start and end images | `POST /v1/videos/generations` | `nprQif` | `omni_flash_i2v_<duration>s_first_last` |
+| References to video (R2V) | 1-7 uploaded reference images | `POST /v1/videos/generations` | `MZZa6b` | `abra_r2v_<duration>s` |
 
 Supported durations are `4`, `6`, `8`, and `10` seconds. Supported aspect ratios are:
 
-- `VIDEO_ASPECT_RATIO_PORTRAIT` (`9:16`)
+- `VIDEO_ASPECT_RATIO_PORTRAIT` (`9:16`, default)
 - `VIDEO_ASPECT_RATIO_LANDSCAPE` (`16:9`)
 
-First + Last generation with `batchAsyncGenerateVideoStartAndEndImage` and the current `abra_i2v_*` mapping has been verified with a real Flow generation.
+All 3 modes use native Google Flow Batch RPCs and Gemini Omni Flash. No Veo fallback is ever used.
 
 ## End-to-end integration flow
 
