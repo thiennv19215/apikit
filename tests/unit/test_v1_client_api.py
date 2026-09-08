@@ -193,6 +193,17 @@ async def test_v1_rejects_direct_media_ids():
 
 
 @pytest.mark.asyncio
+async def test_v1_characters_disabled():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.get("/v1/characters")
+        assert resp.status_code == 404
+        post_resp = await ac.post("/v1/characters", json={"name": "Test"})
+        assert post_resp.status_code == 404
+
+
+@pytest.mark.skip(reason="Temporarily disabled /v1/characters")
+@pytest.mark.asyncio
 async def test_character_crud_endpoints():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -283,20 +294,11 @@ async def test_health_endpoints_parity():
 
 
 @pytest.mark.asyncio
-async def test_multi_job_status_and_character_reference_image():
+async def test_multi_job_status():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        # Create character with reference image
-        char_resp = await ac.post("/v1/characters", json={
-            "name": "Sorceress",
-            "entity_type": "character",
-            "reference_media_ids": ["ref-media-777"]
-        })
-        assert char_resp.status_code == 201
-        char_id = char_resp.json()["id"]
-
-        # Queue character image generation
-        gen_resp = await ac.post(f"/v1/characters/{char_id}/images/generations", json={
+        # Queue image generation
+        gen_resp = await ac.post("/v1/images/generations", json={
             "prompt": "Casting lightning spell",
             "aspect_ratio": "16:9"
         })

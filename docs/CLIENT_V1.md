@@ -18,10 +18,6 @@ Client gửi ảnh dạng **Base64 (`image_base64`)** trực tiếp trong reques
 | GET | `/v1/jobs/{job_id}` | Tra cứu trạng thái một job |
 | GET | `/v1/jobs/status/{job_id}` | Alias tra cứu trạng thái |
 | GET | `/v1/jobs/{job_id}/executions` | Lịch sử audit thực thi; 404 nếu không tồn tại |
-| POST, GET | `/v1/characters` | 201 tạo nhân vật / 200 lấy danh sách (nhận ảnh Base64) |
-| GET, PATCH, DELETE | `/v1/characters/{id}` | 200 đọc, sửa, 204 xóa nhân vật |
-| POST | `/v1/characters/{id}/images/generations` | 202; sinh ảnh nhân vật |
-| POST | `/v1/characters/{id}/videos/generations` | 202; sinh video nhân vật |
 
 > [!IMPORTANT]
 > **Không có endpoint Upload trên Client V1:** Khách hàng không cần gọi bước upload riêng biệt nào. Truyền chuỗi Base64 trực tiếp vào trường `image_base64` của `input_images`.

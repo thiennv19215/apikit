@@ -58,9 +58,7 @@ async def test_maintenance_blocks_writes_but_keeps_polling(monkeypatch):
         assert health.status_code == 503
         assert health.json()["status"] == "maintenance"
         for method, path in [("POST", "/v1/images/generations"),
-                             ("POST", "/v1/characters"),
-                             ("PATCH", "/v1/characters/test"),
-                             ("DELETE", "/v1/characters/test")]:
+                             ("POST", "/v1/videos/generations")]:
             response = await client.request(method, path, json={"prompt": "test"})
             assert response.status_code == 503
             assert response.headers["retry-after"] == "60"

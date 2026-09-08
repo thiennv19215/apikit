@@ -13,7 +13,6 @@ Tài liệu tổng hợp toàn bộ các endpoint của FlowKit Server, phân đ
    - [Upload Media & Base64](#12-upload-media--base64)
    - [Sinh Hình Ảnh & Video](#13-sinh-hình-ảnh--video)
    - [Tra cứu trạng thái Tác vụ (Jobs)](#14-tra-cứu-trạng-thái-tác-vụ-jobs)
-   - [Quản lý Nhân vật (Characters)](#15-quản-lý-nhân-vật-characters)
 2. [Nhóm 2: Agent / CLI Workflows (/api)](#nhóm-2-agent--cli-workflows-api)
    - [Dự án (Projects)](#21-dự-án-projects)
    - [Tập phim (Videos)](#22-tập-phim-videos)
@@ -221,17 +220,7 @@ Hệ thống sử dụng **Gemini Omni Flash** độc quyền trên Google Flow 
 
 ---
 
-### 1.4. Quản lý Nhân vật (Characters)
-| Method | Endpoint | Mục đích |
-|---|---|---|
-| `POST` | `/v1/characters` | Tạo nhân vật mới (chấp nhận ảnh Base64 `input_images` hoặc `reference_media_ids`) |
-| `GET` | `/v1/characters` | Lấy danh sách toàn bộ nhân vật trong catalog |
-| `GET` | `/v1/characters/{id}` | Lấy chi tiết thông tin một nhân vật |
-| `PATCH` | `/v1/characters/{id}` | Cập nhật tên, mô tả, image_prompt, model của nhân vật |
-| `DELETE` | `/v1/characters/{id}` | Xóa nhân vật khỏi catalog |
-| `GET` | `/v1/characters/{id}/reference-images/{index}` | Trả về HTTP 307 Redirect tới URL ảnh mẫu của nhân vật |
-| `POST` | `/v1/characters/{id}/images/generations` | Sinh ảnh nhân vật (Alias: `/images`) |
-| `POST` | `/v1/characters/{id}/videos/generations` | Sinh video nhân vật (Alias: `/videos`) |
+*(Endpoint `/v1/characters` tạm thời được gỡ bỏ khỏi Client API v1).*
 
 ---
 
