@@ -35,7 +35,7 @@ class ImageModelContract(BaseModel):
 
 
 class InlineImageInput(BaseModel):
-    image_base64: str | None = None
+    image_base64: str = Field(..., description="Base64-encoded image content. Direct media IDs are not allowed on Client v1.")
     media_id: str | None = None
     mime_type: str = "image/jpeg"
     file_name: str = "reference.png"
@@ -72,6 +72,15 @@ class ImageGenerationRequest(ImageModelContract):
     project_id: str | None = None
     reference_media_ids: list[str] = Field(default_factory=list)
 
+    @model_validator(mode="before")
+    @classmethod
+    def reject_raw_media_ids(cls, data):
+        if not isinstance(data, dict):
+            return data
+        if data.get("reference_media_ids"):
+            raise ValueError("Direct reference_media_ids are not allowed on Client v1. Pass images as base64 in input_images.")
+        return data
+
     @model_validator(mode="after")
     def sync_counts(self):
         if self.variant_count > 1 and self.count == 1:
@@ -105,6 +114,11 @@ class VideoGenerationRequest(BaseModel):
         if not isinstance(data, dict):
             return data
         data = dict(data)
+        if data.get("start_media_id") or data.get("end_media_id") or data.get("reference_media_ids"):
+            raise ValueError(
+                "Direct media IDs (start_media_id, end_media_id, reference_media_ids) are not allowed on Client v1. "
+                "Pass images strictly as base64 in input_images (using image_base64)."
+            )
         aliases = {"i2v": "image_to_video", "r2v": "reference_to_video",
                    "ingredients": "reference_to_video", "references": "reference_to_video",
                    "omni": "reference_to_video", "start_end": "image_to_video",

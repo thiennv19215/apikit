@@ -83,7 +83,9 @@ curl -X POST https://apikit.shopcongngheso5.io.vn/v1/videos/generations \
     ]
   }'
 ```
-*(Nếu đã có `media_id` trên Google Flow, có thể truyền `"start_media_id": "<UUID>"` thay cho `input_images`)*.
+
+> [!NOTE]
+> **Quy chuẩn Input V1:** Phía Client V1 **chỉ truyền ảnh dạng Base64 (`image_base64`)**, không cho phép truyền `media_id` hay các UUID nội bộ của Google Flow. Hệ thống FlowKit sẽ tự động upload Base64 lên Flow, lấy UUID và map vào đúng RPC backend.
 
 ---
 
@@ -114,7 +116,6 @@ curl -X POST https://apikit.shopcongngheso5.io.vn/v1/videos/generations \
     ]
   }'
 ```
-*(Hoặc truyền `"start_media_id": "<UUID_DAU>"`, `"end_media_id": "<UUID_CUOI>"`)*.
 
 ---
 
@@ -145,7 +146,7 @@ curl -X POST https://apikit.shopcongngheso5.io.vn/v1/videos/generations \
     ]
   }'
 ```
-*(Hoặc truyền `"reference_media_ids": ["<UUID_1>", "<UUID_2>"]`)*.
+
 
 ---
 

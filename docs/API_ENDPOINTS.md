@@ -96,7 +96,10 @@ Các endpoint này nhận yêu cầu bất đồng bộ (Asynchronous), trả v�
 #### 1.3.2. Sinh Video: `POST /v1/videos/generations` (Omni Flash Mode)
 Hệ thống sử dụng **Gemini Omni Flash** độc quyền trên Google Flow (tuyệt đối không dùng Veo), hỗ trợ cả 3 chế độ qua Batch RPC:
 
-**1. Image-to-Video (First Frame - RPC `eb1hJf`):**
+> [!IMPORTANT]
+> **Quy định dữ liệu ảnh trên Client V1:** API v1 **chỉ chấp nhận ảnh dạng Base64 (`image_base64`)** trong mảng `input_images`. Khách hàng gọi API v1 **không được phép truyền `media_id`** (UUID nội bộ của Google Flow). Nếu truyền direct media IDs, API sẽ trả về lỗi HTTP 422. Server sẽ tự động upload Base64 và map UUID backend.
+
+**1. First Frame (Image-to-Video - RPC `eb1hJf`):**
 ```json
 {
   "prompt": "Samurai draws katana with lightning aura, camera zooms in",

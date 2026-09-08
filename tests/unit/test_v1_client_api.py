@@ -156,6 +156,43 @@ async def test_video_generation_endpoint_and_status():
 
 
 @pytest.mark.asyncio
+async def test_v1_rejects_direct_media_ids():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        # Video endpoint rejects start_media_id
+        resp1 = await ac.post("/v1/videos/generations", json={
+            "prompt": "Test video",
+            "start_media_id": "c1611a51-bb44-42b7-84bc-2e997f7bb194",
+        })
+        assert resp1.status_code == 422
+        assert "Direct media IDs" in resp1.text
+
+        # Video endpoint rejects reference_media_ids
+        resp2 = await ac.post("/v1/videos/generations", json={
+            "prompt": "Test video",
+            "reference_media_ids": ["c1611a51-bb44-42b7-84bc-2e997f7bb194"],
+        })
+        assert resp2.status_code == 422
+        assert "Direct media IDs" in resp2.text
+
+        # Video endpoint rejects input_images missing image_base64
+        resp3 = await ac.post("/v1/videos/generations", json={
+            "prompt": "Test video",
+            "input_images": [{"media_id": "c1611a51-bb44-42b7-84bc-2e997f7bb194"}],
+        })
+        assert resp3.status_code == 422
+
+        # Image endpoint rejects reference_media_ids
+        resp4 = await ac.post("/v1/images/generations", json={
+            "prompt": "Test image",
+            "reference_media_ids": ["c1611a51-bb44-42b7-84bc-2e997f7bb194"],
+        })
+        assert resp4.status_code == 422
+        assert "Direct reference_media_ids are not allowed" in resp4.text
+
+
+
+@pytest.mark.asyncio
 async def test_character_crud_endpoints():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
