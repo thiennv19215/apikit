@@ -454,6 +454,48 @@ function getCallbackUrl() {
   }
 }
 
+function getNetlogUrl() {
+  try {
+    const url = new URL(agentWsUrl);
+    const protocol = url.protocol === 'wss:' ? 'https:' : 'http:';
+    return `${protocol}//${url.host}/api/ext/netlog`;
+  } catch {
+    return 'http://127.0.0.1:8100/api/ext/netlog';
+  }
+}
+
+// ─── Flow Payload Capture Recorder ──────────────────────────
+const _NETLOG_HOSTS = ['https://flow.google.com/_/*'];
+const _capturedRequests = new Map();
+
+chrome.webRequest.onBeforeRequest.addListener((d) => {
+  if (d.requestBody?.raw?.length) {
+    try {
+      const body = new TextDecoder().decode(new Uint8Array(d.requestBody.raw[0].bytes));
+      if (body && (body.includes('eb1hJf') || body.includes('batchexecute'))) {
+        console.log('[FLOW_CAPTURE] Detected batchexecute request:', d.url);
+        _capturedRequests.set(d.requestId, { ts: new Date().toISOString(), url: d.url, body });
+      }
+    } catch (e) {
+      console.warn('[FLOW_CAPTURE] Error decoding request:', e);
+    }
+  }
+}, { urls: _NETLOG_HOSTS }, ['requestBody']);
+
+chrome.webRequest.onCompleted.addListener((d) => {
+  const rec = _capturedRequests.get(d.requestId);
+  if (!rec) return;
+  _capturedRequests.delete(d.requestId);
+  console.log('[FLOW_CAPTURE] Posting captured payload to server...');
+  fetch(getNetlogUrl(), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...rec, statusCode: d.statusCode }),
+  }).catch((err) => {
+    console.warn('[FLOW_CAPTURE] Error posting to netlog:', err);
+  });
+}, { urls: _NETLOG_HOSTS });
+
 function sendToAgent(msg) {
   // Always deliver via WebSocket if open
   if (ws?.readyState === WebSocket.OPEN) {

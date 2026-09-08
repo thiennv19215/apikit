@@ -3,6 +3,8 @@ import asyncio
 import json
 import logging
 import signal
+import time
+from pathlib import Path
 from contextlib import asynccontextmanager
 
 import websockets
@@ -10,7 +12,7 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-from agent.config import API_HOST, API_PORT, WS_HOST, WS_PORT
+from agent.config import API_HOST, API_PORT, WS_HOST, WS_PORT, BASE_DIR
 from agent.db.schema import init_db, close_db
 from agent.api.characters import router as characters_router
 from agent.api.projects import router as projects_router
@@ -208,6 +210,47 @@ async def ext_callback(request: Request):
             pass
         return {"ok": True}
     return {"ok": False, "reason": "no matching pending request"}
+
+
+# ─── Payload Capture Endpoint (for capturing new Flow RPCs) ──────
+CAPTURED_PAYLOADS_FILE = Path(BASE_DIR) / "data" / "captured_payloads.jsonl"
+
+
+@app.post("/api/ext/netlog")
+async def ext_netlog(request: Request):
+    """Receive captured network requests from extension recorder."""
+    try:
+        data = await request.json()
+    except Exception:
+        return {"error": "Invalid JSON"}
+    url = data.get("url", "")
+    body = data.get("body", "")
+    status = data.get("statusCode")
+    ts = data.get("ts", time.strftime("%Y-%m-%dT%H:%M:%SZ"))
+
+    # Log to disk
+    CAPTURED_PAYLOADS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(CAPTURED_PAYLOADS_FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"ts": ts, "url": url, "status": status, "body": body}) + "\n")
+
+    logger.info("[FLOW_CAPTURE] Logged network payload: url=%s length=%d", url, len(body or ""))
+    return {"ok": True}
+
+
+@app.get("/api/ext/captured-payloads")
+async def get_captured_payloads(limit: int = 10):
+    """Read recently captured payloads."""
+    if not CAPTURED_PAYLOADS_FILE.exists():
+        return {"payloads": []}
+    lines = []
+    with open(CAPTURED_PAYLOADS_FILE, "r", encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                try:
+                    lines.append(json.loads(line))
+                except Exception:
+                    pass
+    return {"total": len(lines), "payloads": lines[-limit:]}
 
 
 @app.get("/health")
