@@ -14,8 +14,16 @@ import aiohttp
 
 from agent.db import crud
 from agent.services.flow_client import get_flow_client
+from datetime import datetime, timezone
+
 from agent.services.event_bus import event_bus
-from agent.config import POLL_INTERVAL, MAX_RETRIES, API_COOLDOWN, MAX_CONCURRENT_REQUESTS
+from agent.config import (
+    POLL_INTERVAL,
+    MAX_RETRIES,
+    API_COOLDOWN,
+    MAX_CONCURRENT_REQUESTS,
+    CLIENT_V1_QUEUE_TIMEOUT,
+)
 from agent.worker._parsing import _is_error
 from agent.sdk.services.result_handler import parse_result, apply_scene_result, apply_character_result
 
@@ -107,12 +115,37 @@ class WorkerController:
         except Exception as e:
             logger.warning("Could not clean up stale requests: %s", e)
 
+    async def _expire_unserviceable_pending_requests(self):
+        """Fail requests stuck in PENDING for too long when no extension is connected."""
+        try:
+            pending = await crud.list_requests(status="PENDING")
+            now = datetime.now(timezone.utc)
+            for req in pending:
+                c_at = req.get("created_at")
+                if not c_at:
+                    continue
+                try:
+                    t_c = datetime.fromisoformat(c_at.replace("Z", "+00:00"))
+                    age = (now - t_c).total_seconds()
+                except Exception:
+                    continue
+                if age > CLIENT_V1_QUEUE_TIMEOUT:
+                    rid = req["id"]
+                    msg = f"EXTENSION_UNAVAILABLE_TIMEOUT: Request expired after waiting {int(age)}s with no active Chrome extension connected."
+                    await crud.update_request(rid, status="FAILED", error_message=msg)
+                    await _mark_scene_failed(req)
+                    logger.error("Request %s timed out waiting for extension (%ds): failed permanently", rid[:8], int(age))
+                    await event_bus.emit("request_update", {"id": rid, "status": "FAILED", "error": msg})
+        except Exception as e:
+            logger.warning("Error checking unserviceable pending requests: %s", e)
+
     async def _run_loop(self):
         client = get_flow_client()
 
         while not self._shutdown.is_set():
             try:
                 if not client.connected:
+                    await self._expire_unserviceable_pending_requests()
                     await asyncio.sleep(POLL_INTERVAL)
                     continue
 
@@ -727,9 +760,16 @@ async def _handle_failure(rid: str, req: dict, result: dict, retry_after: dict =
         return
 
     if "profile_unavailable" in error_lower:
-        await crud.update_request(rid, status="PENDING", error_message=str(error_msg))
-        if retry_after is not None:
-            retry_after[rid] = time.time() + 60
+        retry = req.get("retry_count", 0) + 1
+        if retry <= 3:
+            await crud.update_request(rid, status="PENDING", retry_count=retry, error_message=str(error_msg))
+            if retry_after is not None:
+                retry_after[rid] = time.time() + 60
+            logger.warning("Request %s profile unavailable (retry %d/3 in 60s): %s", rid[:8], retry, error_msg)
+            return
+        await crud.update_request(rid, status="FAILED", error_message=f"PROFILE_UNAVAILABLE_MAX_RETRIES: {error_msg}")
+        await _mark_scene_failed(req)
+        logger.error("Request %s FAILED permanently: profile unavailable after 3 retries", rid[:8])
         return
 
     if "unsupported_on_batch_api" in error_lower or "failed: [3]" in error_lower or "invalid_argument" in error_lower or "model_access_denied" in error_lower:
@@ -751,10 +791,18 @@ async def _handle_failure(rid: str, req: dict, result: dict, retry_after: dict =
         logger.error("Request %s FAILED (max project retries reached): %s", rid[:8], error_msg)
         return
 
-    # WS transient errors (extension disconnect/reconnect): retry without incrementing count
+    # WS transient errors (extension disconnect/reconnect): retry up to 3 times
     if "extension reconnected" in error_lower or "extension disconnected" in error_lower or "extension not connected" in error_lower:
-        await crud.update_request(rid, status="PENDING", error_message=str(error_msg))
-        logger.info("Request %s transient WS error, will retry (no retry increment): %s", rid[:8], error_msg)
+        retry = req.get("retry_count", 0) + 1
+        if retry <= 3:
+            await crud.update_request(rid, status="PENDING", retry_count=retry, error_message=str(error_msg))
+            if retry_after is not None:
+                retry_after[rid] = time.time() + 15
+            logger.info("Request %s transient WS error (retry %d/3 in 15s): %s", rid[:8], retry, error_msg)
+            return
+        await crud.update_request(rid, status="FAILED", error_message=f"EXTENSION_DISCONNECTED_MAX_RETRIES: {error_msg}")
+        await _mark_scene_failed(req)
+        logger.error("Request %s FAILED permanently: extension disconnected after 3 retries", rid[:8])
         return
 
     # reCAPTCHA errors: retry up to 10 times — deferred dict in main loop handles delay

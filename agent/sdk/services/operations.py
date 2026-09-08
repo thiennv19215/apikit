@@ -252,6 +252,8 @@ async def _poll_operations(
     # to a still-pending round. It is a diagnostic, not a verdict — finished
     # jobs report it too — so it is only worth quoting if we time out.
     last_complaint = None
+    consecutive_poll_errors = 0
+    consecutive_not_found = 0
 
     while elapsed < timeout:
         await asyncio.sleep(poll_interval)
@@ -259,8 +261,21 @@ async def _poll_operations(
 
         status_result = await client.check_video_status(current_ops)
         if _is_error(status_result):
-            logger.warning("Status poll error: %s", status_result.get("error"))
+            err = str(status_result.get("error") or "")
+            consecutive_poll_errors += 1
+            logger.warning("Status poll error (%d): %s", consecutive_poll_errors, err)
+            if "failed: [5]" in err or "not found" in err.lower():
+                consecutive_not_found += 1
+                if consecutive_not_found >= 3:
+                    logger.error("Operation NOT_FOUND upstream 3 times: aborting poll immediately (%s)", err)
+                    return {"error": f"Operation not found upstream: {err}"}
+            if consecutive_poll_errors >= 6:
+                logger.error("Status polling failed 6 consecutive times: aborting poll (%s)", err)
+                return {"error": f"Status polling failed: {err}"}
             continue
+
+        consecutive_poll_errors = 0
+        consecutive_not_found = 0
 
         data = status_result.get("data", status_result)
         ops = data.get("operations", [])
