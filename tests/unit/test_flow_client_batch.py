@@ -5,6 +5,7 @@ poller, the scene writers — was written against the old REST responses. These
 tests hold the adapter to that contract, so a transport swap stays invisible.
 """
 import json
+import uuid
 
 import pytest
 
@@ -153,18 +154,15 @@ class TestGenerateVideo:
         payload = json.loads(json.loads(client.calls[0]["freq"])[0][0][1])
         assert payload[0][0][4][1] == "start-mid"
 
-    async def test_r2v_fails_loudly_by_default(self, client):
-        result = await client.generate_video_from_references(["a", "b"], "go", PROJECT, "s")
-        assert "UNSUPPORTED_ON_BATCH_API" in result["error"]
-
-    async def test_degraded_r2v_uses_the_first_reference_as_the_start_frame(self, client, monkeypatch):
-        import agent.services.flow_client as module
-        monkeypatch.setattr(module, "FLOW_ALLOW_DEGRADED", True)
-        client.responses[fb.RPC_GEN_VIDEO] = self._submitted(client)
-
-        await client.generate_video_from_references(["ref-a", "ref-b"], "go", PROJECT, "s")
+    async def test_r2v_uses_batch_rpc(self, client):
+        client.responses[fb.RPC_GEN_VIDEO_REFS] = {
+            "data": envelope(fb.RPC_GEN_VIDEO_REFS, [None, 50, [[OPERATION, PROJECT, "scene", None]]])
+        }
+        result = await client.generate_video_from_references(["ref-a", "ref-b"], "go", PROJECT, "s")
+        assert not _is_error(result)
+        assert client.calls[0]["rpcid"] == fb.RPC_GEN_VIDEO_REFS
         payload = json.loads(json.loads(client.calls[0]["freq"])[0][0][1])
-        assert payload[0][0][4][1] == "ref-a"
+        assert payload[0][0][1] == [[None, "ref-a"], [None, "ref-b"]]
 
     async def test_upscale_is_unported_and_has_no_fallback(self, client, monkeypatch):
         import agent.services.flow_client as module
@@ -310,7 +308,7 @@ class TestMediaAndUpload:
         client.responses[fb.RPC_UPLOAD_IMAGE] = {
             "data": envelope(fb.RPC_UPLOAD_IMAGE, [[MEDIA, PROJECT, OPERATION, "CAE"]])
         }
-        await client.upload_image("Ym9keQ==", project_id=PROJECT)
+        await client.upload_image(f"test_data_{uuid.uuid4().hex}", project_id=PROJECT)
         assert client.calls[0]["captcha"] == fb.CAPTCHA_IMAGE
 
 

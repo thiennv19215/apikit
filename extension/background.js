@@ -465,7 +465,11 @@ function getNetlogUrl() {
 }
 
 // ─── Flow Payload Capture Recorder ──────────────────────────
-const _NETLOG_HOSTS = ['https://flow.google.com/*', 'https://labs.google/*'];
+// Capture only Flow's RPC transport.  Broad host-level capture also catches
+// analytics and unrelated UI mutations, which are not useful as builder input.
+const _NETLOG_HOSTS = [
+  'https://flow.google.com/_/AiSandboxAngularFrontend/data/batchexecute*',
+];
 const _capturedRequests = new Map();
 
 chrome.webRequest.onBeforeRequest.addListener((d) => {
@@ -485,7 +489,7 @@ chrome.webRequest.onBeforeRequest.addListener((d) => {
     }
   }
 
-  if (body) {
+  if (body && (d.url.includes('/batchexecute') || body.includes('f.req'))) {
     console.log('[FLOW_CAPTURE] Captured request to:', d.url);
     _capturedRequests.set(d.requestId, { ts: new Date().toISOString(), url: d.url, body });
   }

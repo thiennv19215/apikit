@@ -116,7 +116,12 @@ class VideoGenerationRequest(BaseModel):
         legacy = data.get("type")
         if preferred is not None and legacy is not None and canonical(preferred) != canonical(legacy):
             raise ValueError("generation_type and type must agree")
-        value = canonical(preferred if preferred is not None else legacy or "image_to_video")
+        has_refs = bool(data.get("reference_media_ids")) or any(
+            isinstance(img, dict) and img.get("role") == "reference"
+            for img in data.get("input_images", [])
+        )
+        default_type = "reference_to_video" if has_refs else "image_to_video"
+        value = canonical(preferred if preferred is not None else legacy or default_type)
         data["type"] = data["generation_type"] = value
         requested_model = data.get("model") or data.get("mode") or data.get("model_family") or "omni_flash"
         if isinstance(requested_model, str) and requested_model.strip().lower() in {"omni", "flash", "lite", "omni_flash"}:

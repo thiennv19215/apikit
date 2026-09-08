@@ -1,0 +1,37 @@
+# Capture one Google Flow batch RPC payload for a missing capability.
+
+Usage: `/fk-capture-flow-payload <capability>`
+
+Use only for internal FlowKit development when a new Google Flow capability or
+model needs an exact `batchexecute` request shape. Do not use this for client
+generation, and do not add this workflow to client v1 documentation.
+
+## Safety boundary
+
+- Get explicit approval before performing the one Flow UI action: it can spend
+  credits.
+- Capture only the targeted `batchexecute` call. The extension recorder filters
+  out unrelated browser traffic.
+- Treat captured data as sensitive operational evidence. Do not commit, quote,
+  or retain cookies, captcha tokens, signed URLs, project IDs, prompts, or media
+  IDs. Remove the captured record after extracting the shape.
+
+## Workflow
+
+1. Check the VPS `/health` and confirm the extension is connected.
+2. Specify the exact UI action and inputs that distinguish the capability (for
+   example, Omni Flash with a start and end frame).
+3. Reload the extension so the recorder is active; perform that action exactly
+   once in a signed-in Flow tab.
+4. Retrieve the newest record from `/api/ext/captured-payloads`; parse the
+   `f.req` envelope to identify `rpcid` and the inner positional payload.
+5. Diff it against the nearest builder in `agent/services/flow_batch.py`.
+   Verify which slots carry model, duration, aspect, and each media input; a
+   successful response alone does not prove a slot was used.
+6. Add a sanitized builder and focused test. Enable the corresponding relay and
+   health capability only after the test passes.
+7. Remove the captured payload record. Report only the sanitized mapping and
+   verification result.
+
+If the action does not produce a matching record, stop and report that fact;
+do not infer Google's positional payload.

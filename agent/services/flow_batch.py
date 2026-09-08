@@ -36,6 +36,7 @@ MEDIA_HOST = "flow-content.google"
 
 RPC_GEN_IMAGE = "ogiZ0b"
 RPC_GEN_VIDEO = "eb1hJf"
+RPC_GEN_VIDEO_REFS = "MZZa6b"
 RPC_OPERATION = "jwpduf"
 RPC_PROJECT_MEDIA = "Zzl0ze"
 RPC_MEDIA = "as29s"
@@ -226,14 +227,15 @@ def resolve_video_model(key: Optional[str]) -> str:
             return k
         if "ultra" in k or "pro" in k:
             return "veo_3_1_i2v_s_fast_ultra"
-        if "abra" in k or "omni" in k or "flash" in k:
+        if "abra" in k or "omni" in k or "flash" in k or "r2v" in k:
+            prefix = "abra_r2v_" if ("r2v" in k or "ref" in k) else "abra_i2v_"
             if "4" in k:
-                return "abra_i2v_4s"
+                return f"{prefix}4s"
             if "6" in k:
-                return "abra_i2v_6s"
+                return f"{prefix}6s"
             if "10" in k:
-                return "abra_i2v_10s"
-            return "abra_i2v_8s"
+                return f"{prefix}10s"
+            return f"{prefix}8s"
         if "lite" in k or "fast" in k or "standard" in k or "veo" in k:
             return "veo_3_1_i2v_lite"
     return VIDEO_MODEL
@@ -388,6 +390,25 @@ def video_request(prompt: str, project_id: str, source_media_id: str,
     return build_envelope(RPC_GEN_VIDEO, inner)
 
 
+def video_refs_request(prompt: str, project_id: str,
+                       ref_media_ids: list[str],
+                       aspect: Any = VIDEO_ASPECT_PORTRAIT,
+                       model: str = "abra_r2v_8s") -> str:
+    """Build envelope for reference-to-video (R2V) generation via RPC MZZa6b."""
+    refs = [[None, mid] for mid in ref_media_ids]
+    inner = [
+        [[[None, None, [[[prompt]]]],
+          refs,
+          model,
+          resolve_video_aspect(aspect),
+          None,
+          [None, None, None, None, _client_uuid(), _client_uuid()]]],
+        _context(project_id),
+        [_client_uuid(), 2],
+    ]
+    return build_envelope(RPC_GEN_VIDEO_REFS, inner)
+
+
 def upload_request(image_b64: str, project_id: str, mime_type: str = "image/jpeg",
                    file_name: str = "upload.jpg") -> str:
     """Put a local image into the project so it can be used as a reference.
@@ -468,14 +489,18 @@ def read_operation(payload: Any) -> Operation:
     """
     records = payload[2] if isinstance(payload, list) and len(payload) > 2 else None
     record = records[0] if isinstance(records, list) and records else None
-    if not isinstance(record, list) or not record:
-        raise FlowBatchError("operation payload carried no record")
-    return Operation(
-        operation_id=record[0],
-        project_id=record[1] if len(record) > 1 else None,
-        status=record[3] if len(record) > 3 else None,
-        error=read_operation_error(record),
-    )
+    if isinstance(record, list) and record:
+        return Operation(
+            operation_id=record[0],
+            project_id=record[1] if len(record) > 1 else None,
+            status=record[3] if len(record) > 3 else None,
+            error=read_operation_error(record),
+        )
+    # Fallback: scan for standard UUID in strings (MZZa6b or variant responses)
+    for text in _walk_strings(payload):
+        if re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', text, re.I):
+            return Operation(operation_id=text, project_id=None, status=None, error=None)
+    raise FlowBatchError("operation payload carried no record")
 
 
 def read_operation_error(record: list) -> Optional[str]:

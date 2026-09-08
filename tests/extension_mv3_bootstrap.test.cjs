@@ -61,11 +61,16 @@ const chrome = {
   },
   tabs: {
     create: async () => ({}),
+    onUpdated: event(),
     query: async () => [],
     sendMessage: async () => {},
     update: async () => {},
   },
-  webRequest: { onBeforeSendHeaders: event() },
+  webRequest: {
+    onBeforeSendHeaders: event(),
+    onBeforeRequest: event(),
+    onCompleted: event(),
+  },
 };
 
 const context = vm.createContext({
@@ -98,7 +103,7 @@ setImmediate(async () => {
 
   const socket = sockets[0];
   socket.readyState = FakeWebSocket.OPEN;
-  socket.onopen();
+  await socket.onopen();
 
   assert.equal(socket.messages[0].type, 'extension_ready');
   assert.equal(socket.messages[0].flowKeyPresent, true);

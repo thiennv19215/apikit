@@ -524,6 +524,7 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
                 ref_media_ids.append(mid)
             else:
                 unlabelled_mids.append(mid)
+
         uploaded_mids = unlabelled_mids
 
         if uploaded_mids:
@@ -536,10 +537,6 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
 
         is_ref_based = req_type == "GENERATE_VIDEO_REFS" or bool(ref_media_ids)
 
-        # The current batch capture is verified for Abra first-frame I2V only.
-        # Do not drop frames/references or route the request to Veo.
-        if is_ref_based:
-            return {"error": "OMNI_R2V_NOT_CAPTURED: Abra reference-to-video requires a captured Flow batch payload"}
         if end_media_id:
             return {"error": "OMNI_START_END_NOT_CAPTURED: Abra first+last requires a captured Flow batch payload"}
 
@@ -557,20 +554,29 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
             except (ImportError, ModuleNotFoundError, AttributeError):
                 pass
 
-        if is_ref_based and ref_media_ids:
-            return {"error": "OMNI_R2V_NOT_CAPTURED: Abra reference-to-video requires a captured Flow batch payload"}
-        if not start_media_id:
-            return {"error": "Video generation requires start_media_id or input_images"}
         duration = payload.get("duration_seconds", 8)
-        submit_result = await client.generate_video(
-            start_image_media_id=start_media_id,
-            prompt=prompt,
-            project_id=pid,
-            scene_id="",
-            aspect_ratio=aspect_ratio,
-            video_model=f"abra_i2v_{duration}s",
-            preferred_installation=inst_id,
-        )
+        if is_ref_based and ref_media_ids:
+            submit_result = await client.generate_video_from_references(
+                reference_media_ids=ref_media_ids,
+                prompt=prompt,
+                project_id=pid,
+                scene_id="",
+                aspect_ratio=aspect_ratio,
+                video_model=f"abra_r2v_{duration}s",
+                preferred_installation=inst_id,
+            )
+        else:
+            if not start_media_id:
+                return {"error": "Video generation requires start_media_id or input_images"}
+            submit_result = await client.generate_video(
+                start_image_media_id=start_media_id,
+                prompt=prompt,
+                project_id=pid,
+                scene_id="",
+                aspect_ratio=aspect_ratio,
+                video_model=f"abra_i2v_{duration}s",
+                preferred_installation=inst_id,
+            )
 
         if _is_error(submit_result):
             return submit_result

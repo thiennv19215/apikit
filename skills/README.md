@@ -32,6 +32,7 @@ Workflow skills for AI agents and humans. Each skill is a step-by-step recipe.
 |-------|------|-------------|
 | `fk-status` | [fk-status.md](fk-status.md) | Full project dashboard + next action |
 | `fk-fix-uuids` | [fk-fix-uuids.md](fk-fix-uuids.md) | Repair any CAMS... media_ids to UUID format |
+| `fk-capture-flow-payload` | [fk-capture-flow-payload.md](fk-capture-flow-payload.md) | Internal: capture one Flow batch RPC shape for a missing capability |
 
 ## Cross-Tool Compatibility
 

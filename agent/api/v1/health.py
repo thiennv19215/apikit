@@ -74,6 +74,6 @@ async def client_health(response: Response):
             "video_generation": Capability(available=bool(provider_ready), reason=reason),
             "video_first_frame": Capability(available=video_first_frame_ready, reason=reason),
             "video_start_end": Capability(available=False, reason="OMNI_START_END_NOT_CAPTURED"),
-            "video_reference": Capability(available=False, reason="OMNI_R2V_NOT_CAPTURED"),
+            "video_reference": Capability(available=bool(provider_ready), reason=reason),
         },
     )

@@ -882,29 +882,44 @@ class FlowClient:
                                               user_paygate_tier: str = "PAYGATE_TIER_TWO",
                                               video_model: str | None = None,
                                               preferred_installation: str | None = None) -> dict:
-        """Generate video from multiple reference images (r2v)."""
+        """Generate video from multiple reference images (r2v) using batch RPC MZZa6b."""
         if not USE_BATCH_RPC:
             return await self._legacy_generate_video_from_references(
                 reference_media_ids, prompt, project_id, scene_id,
                 aspect_ratio, user_paygate_tier)
 
-        if not FLOW_ALLOW_DEGRADED:
-            return {"error": _unsupported(
-                "reference-to-video (r2v)",
-                "its payload was never captured off the new UI",
-            )}
         if not reference_media_ids:
             return {"error": "No reference media_ids for r2v"}
-        logger.warning(
-            "Scene %s: r2v is not on the batch path — running i2v off the first "
-            "reference %s because FLOW_ALLOW_DEGRADED=1",
-            str(scene_id)[:12], reference_media_ids[0][:12])
-        return await self.generate_video(
-            start_image_media_id=reference_media_ids[0], prompt=prompt,
-            project_id=project_id, scene_id=scene_id, aspect_ratio=aspect_ratio,
-            user_paygate_tier=user_paygate_tier, video_model=video_model,
+
+        cand_ws = self._select_extension(
+            require_token=False,
             preferred_installation=preferred_installation,
+            preferred_project_id=project_id or None,
         )
+        target_inst = preferred_installation or (
+            self._extensions[cand_ws].get("installation_id") if cand_ws in self._extensions else None
+        )
+        try:
+            pid = self._batch_project_id(project_id, preferred_installation=target_inst)
+            model = fb.resolve_video_model(video_model or "abra_r2v_4s")
+            if "r2v" not in model:
+                model = model.replace("i2v", "r2v")
+            freq = fb.video_refs_request(
+                prompt, pid, reference_media_ids, aspect=aspect_ratio,
+                model=model,
+            )
+            payload = await self._batch_payload(
+                fb.RPC_GEN_VIDEO_REFS, freq, fb.CAPTCHA_VIDEO, timeout=120,
+                preferred_installation=target_inst,
+                preferred_project_id=pid,
+            )
+            operation = fb.read_operation(payload)
+        except Exception as e:
+            return _batch_error(e)
+
+        self._remember_operation(operation.operation_id, pid, installation_id=target_inst)
+        return {"status": 200, "data": {"operations": [_as_pending_operation(operation.operation_id)]},
+                "_installation_id": target_inst}
 
     async def upscale_video(self, media_id: str, scene_id: str,
                              aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",

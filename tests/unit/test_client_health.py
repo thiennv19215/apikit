@@ -36,8 +36,9 @@ async def test_health_capabilities(monkeypatch, connected, available, code, stat
     expected_reason = None if code == 200 else "PROVIDER_UNAVAILABLE"
     assert body["capabilities"]["video_generation"] == {
         "available": code == 200, "reason": expected_reason}
+    assert body["capabilities"]["video_reference"] == {
+        "available": code == 200, "reason": expected_reason}
     assert body["capabilities"]["video_start_end"]["reason"] == "OMNI_START_END_NOT_CAPTURED"
-    assert body["capabilities"]["video_reference"]["reason"] == "OMNI_R2V_NOT_CAPTURED"
 
 
 async def test_database_unavailable(monkeypatch):
