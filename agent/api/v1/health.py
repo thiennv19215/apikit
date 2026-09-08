@@ -57,24 +57,23 @@ async def client_health(response: Response):
         provider_ready = False
         reason = "BACKEND_UNAVAILABLE"
 
-    from agent.services.omni_flash import _batch_path_blocks_omni
-    video_reason = "OMNI_TRANSPORT_UNSUPPORTED" if _batch_path_blocks_omni() else reason
-    video_ready = bool(provider_ready and not video_reason)
-    if video_ready and client._select_extension(True) is None:
-        video_ready = False
-        video_reason = "OMNI_AUTH_UNAVAILABLE"
+    # The captured batch request supports Abra first-frame only. Start/end and
+    # R2V stay disabled until their own payloads are captured and verified.
+    video_first_frame_ready = bool(provider_ready)
     if not provider_ready:
         response.status_code = 503
         response.headers["Retry-After"] = "10"
     return ClientHealth(
-        status=("ready" if video_ready else "degraded") if provider_ready else "unavailable",
+        status="ready" if provider_ready else "unavailable",
         maintenance=False, accepting_requests=bool(provider_ready),
-        message=("Image and Omni Flash generation are available." if video_ready else
-                 "Image generation is available; Omni Flash transport/auth is unavailable."
+        message=("Image and Omni Flash video generation are available."
                  if provider_ready else "Backend cannot currently accept generation requests."),
         retry_after_seconds=None if provider_ready else 10,
         capabilities={
             "image_generation": Capability(available=bool(provider_ready), reason=reason),
-            "video_generation": Capability(available=video_ready, reason=video_reason),
+            "video_generation": Capability(available=bool(provider_ready), reason=reason),
+            "video_first_frame": Capability(available=video_first_frame_ready, reason=reason),
+            "video_start_end": Capability(available=False, reason="OMNI_START_END_NOT_CAPTURED"),
+            "video_reference": Capability(available=False, reason="OMNI_R2V_NOT_CAPTURED"),
         },
     )
