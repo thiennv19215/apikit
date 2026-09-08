@@ -43,37 +43,17 @@ Dùng cho load balancer, Docker, Kubernetes hoặc client backend kiểm tra tr�
 
 ---
 
-### 1.2. Upload Media & Base64
-| Method | Endpoint | Mô tả & Header |
-|---|---|---|
-| `POST` | `/v1/media` | Upload Base64 ảnh lên Flow, trả về Google `media_id`.<br>Headers trả về: `X-Flow-Project-Id`, `X-Flow-Media-Cache-Hits` |
-
-**Request Body:**
-```json
-{
-  "image_base64": "iVBORw0KGgoAAAANSUhEUgAA...",
-  "mime_type": "image/jpeg",
-  "file_name": "portrait.jpg"
-}
-```
-**Response Body (200 OK):**
-```json
-{
-  "media_id": "9e5449d8-0555-4b6a-af84-e2cf7d8ed5d6",
-  "file_name": "portrait.jpg",
-  "media": {
-    "name": "9e5449d8-0555-4b6a-af84-e2cf7d8ed5d6",
-    "projectId": "ba107792-8075-4b62-afc1-f3e4a896fde8"
-  }
-}
-```
+> [!IMPORTANT]
+> **Quy định kiến trúc Upload:**
+> - **Phía Client V1 (`/v1/*`): KHÔNG CÓ endpoint upload**. Client chỉ cần gửi chuỗi Base64 (`image_base64`) trực tiếp trong request sinh ảnh (`/v1/images/generations`) hoặc video (`/v1/videos/generations`). Client hoàn toàn không quản lý `media_id` hay tải ảnh lên trước.
+> - **Phía FlowKit Agent (`/api/flow/*`):** Endpoint upload ảnh (`POST /api/flow/upload-image` hoặc CLI skill `/fk-upload-image`) chỉ dành riêng cho Agent nội bộ khi chuẩn bị dữ liệu nhân vật/dự án trong FlowKit Studio.
 
 ---
 
-### 1.3. Sinh Hình Ảnh & Video
+### 1.2. Sinh Hình Ảnh & Video
 Các endpoint này nhận yêu cầu bất đồng bộ (Asynchronous), trả về HTTP **202 Accepted** ngay lập tức kèm theo `JobsResponse`. Worker background tự động upload ảnh Base64 lên profile tài khoản được phân bổ và sinh tác vụ.
 
-#### 1.3.1. Sinh Ảnh: `POST /v1/images/generations`
+#### 1.2.1. Sinh Ảnh: `POST /v1/images/generations`
 **Request Body:**
 ```json
 {
@@ -93,7 +73,7 @@ Các endpoint này nhận yêu cầu bất đồng bộ (Asynchronous), trả v�
 - **Chuẩn FlowKit Model:** `"IMAGE_ASPECT_RATIO_LANDSCAPE"` (Mặc định), `"IMAGE_ASPECT_RATIO_PORTRAIT"`, `"IMAGE_ASPECT_RATIO_SQUARE"`, `"IMAGE_ASPECT_RATIO_PORTRAIT_FOUR_THREE"`, `"IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE"`.
 - **Hỗ trợ Alias:** `"LANDSCAPE"`, `"PORTRAIT"`, `"SQUARE"`, `"HORIZONTAL"`, `"VERTICAL"`, `"16:9"`, `"9:16"`, `"1:1"`, `"3:4"`, `"4:3"`.
 
-#### 1.3.2. Sinh Video: `POST /v1/videos/generations` (Omni Flash Mode)
+#### 1.2.2. Sinh Video: `POST /v1/videos/generations` (Omni Flash Mode)
 Hệ thống sử dụng **Gemini Omni Flash** độc quyền trên Google Flow (tuyệt đối không dùng Veo), hỗ trợ cả 3 chế độ qua Batch RPC:
 
 > [!IMPORTANT]
@@ -200,7 +180,7 @@ Hệ thống sử dụng **Gemini Omni Flash** độc quyền trên Google Flow 
 
 ---
 
-### 1.4. Tra cứu trạng thái Tác vụ (Jobs)
+### 1.3. Tra cứu trạng thái Tác vụ (Jobs)
 | Method | Endpoint | Tham số |
 |---|---|---|
 | `POST` | `/v1/jobs/status` | Body nhận danh sách `{"job_ids": ["job_1", "job_2"]}` hoặc đơn lẻ `{"job_id": "job_1"}` |
@@ -241,7 +221,7 @@ Hệ thống sử dụng **Gemini Omni Flash** độc quyền trên Google Flow 
 
 ---
 
-### 1.5. Quản lý Nhân vật (Characters)
+### 1.4. Quản lý Nhân vật (Characters)
 | Method | Endpoint | Mục đích |
 |---|---|---|
 | `POST` | `/v1/characters` | Tạo nhân vật mới (chấp nhận ảnh Base64 `input_images` hoặc `reference_media_ids`) |

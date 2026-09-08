@@ -3,7 +3,7 @@
 Base URL: `https://apikit.shopcongngheso5.io.vn`
 Local Dev: `http://127.0.0.1:8100`
 
-Client gửi ảnh Base64 ngay trong request hoặc truyền `media_id` có sẵn. Server tự động xử lý upload lên Google Flow, quản lý cache ảnh tránh upload trùng lặp, tự động cân bằng tải và phân bổ profile tài khoản.
+Client gửi ảnh dạng **Base64 (`image_base64`)** trực tiếp trong request. **Phía Client V1 KHÔNG CÓ endpoint upload** (chức năng upload chỉ có ở tầng FlowKit Agent `/api/flow/upload-image` cho quy trình kịch bản nội bộ). Server tự động xử lý upload Base64 lên Google Flow, quản lý SHA-256 cache tránh upload trùng lặp, tự động cân bằng tải và phân bổ profile tài khoản.
 
 ---
 
@@ -12,16 +12,19 @@ Client gửi ảnh Base64 ngay trong request hoặc truyền `media_id` có sẵ
 | Method | Endpoint | Mô tả |
 |---|---|---|
 | GET | `/v1/health` | Kiểm tra trạng thái hệ thống, khả năng nhận tác vụ và danh sách capabilities |
-| POST | `/v1/images/generations` | 202 Accepted, tạo tác vụ sinh ảnh (Nano Banana Pro / Banana 2) |
+| POST | `/v1/images/generations` | 202 Accepted, tạo tác vụ sinh ảnh Base64 (Nano Banana Pro / Banana 2) |
 | POST | `/v1/videos/generations` | 202 Accepted, tạo tác vụ sinh video Gemini Omni Flash (First frame, Start+End, R2V) |
 | POST | `/v1/jobs/status` | Tra cứu trạng thái nhiều job |
 | GET | `/v1/jobs/{job_id}` | Tra cứu trạng thái một job |
 | GET | `/v1/jobs/status/{job_id}` | Alias tra cứu trạng thái |
 | GET | `/v1/jobs/{job_id}/executions` | Lịch sử audit thực thi; 404 nếu không tồn tại |
-| POST, GET | `/v1/characters` | 201 tạo nhân vật / 200 lấy danh sách |
+| POST, GET | `/v1/characters` | 201 tạo nhân vật / 200 lấy danh sách (nhận ảnh Base64) |
 | GET, PATCH, DELETE | `/v1/characters/{id}` | 200 đọc, sửa, 204 xóa nhân vật |
 | POST | `/v1/characters/{id}/images/generations` | 202; sinh ảnh nhân vật |
 | POST | `/v1/characters/{id}/videos/generations` | 202; sinh video nhân vật |
+
+> [!IMPORTANT]
+> **Không có endpoint Upload trên Client V1:** Khách hàng không cần gọi bước upload riêng biệt nào. Truyền chuỗi Base64 trực tiếp vào trường `image_base64` của `input_images`.
 
 ---
 
@@ -54,11 +57,11 @@ Khi hệ thống sẵn sàng và extension Google Flow đã kết nối:
 Tất cả các chế độ sinh video đều sử dụng chung endpoint `POST /v1/videos/generations`.
 Hệ thống **chỉ sử dụng Gemini Omni Flash** (tuyệt đối không dùng Veo) và tự động ánh xạ đúng Google Flow Batch RPC:
 
-| Chế độ | Google Batch RPC | Model Wire Key | Đầu vào |
+| Chế độ | Google Batch RPC | Model Wire Key | Đầu vào (100% Base64) |
 |---|---|---|---|
-| **1. First Frame** | `eb1hJf` | `abra_i2v_<duration>s` | 1 ảnh đầu (`start_media_id` hoặc role `start_frame`) |
-| **2. Start + End Frame** | `nprQif` | `omni_flash_i2v_<duration>s_first_last` | 2 ảnh (`start` + `end` media_id hoặc 2 ảnh role `start_frame` & `end_frame`) |
-| **3. Reference-to-Video (R2V)** | `MZZa6b` | `abra_r2v_<duration>s` | 1–7 ảnh tham chiếu (`reference_media_ids` hoặc role `reference`) |
+| **1. First Frame** | `eb1hJf` | `abra_i2v_<duration>s` | 1 ảnh Base64 với role `start_frame` |
+| **2. Start + End Frame** | `nprQif` | `omni_flash_i2v_<duration>s_first_last` | 2 ảnh Base64 với role `start_frame` & `end_frame` |
+| **3. Reference-to-Video (R2V)** | `MZZa6b` | `abra_r2v_<duration>s` | 1–7 ảnh Base64 với role `reference` |
 
 Thời lượng hỗ trợ: `4`, `6`, `8`, `10` giây (mặc định 8s). Tỉ lệ hỗ trợ: `9:16` (Portrait - mặc định) hoặc `16:9` (Landscape).
 

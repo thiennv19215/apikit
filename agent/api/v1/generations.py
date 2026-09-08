@@ -11,8 +11,6 @@ from fastapi.responses import JSONResponse
 from agent.api.v1.schemas import (
     GeneratedMedia,
     ImageGenerationRequest,
-    ImageUploadRequest,
-    ImageUploadResponse,
     Job,
     JobError,
     JobMetadata,
@@ -169,47 +167,6 @@ async def _resolve_jobs_response(job_ids: list[str]) -> JobsResponse:
         installation_id=first_job.installation_id if first_job else None,
     )
 
-
-@router.post("/v1/media", response_model=ImageUploadResponse, include_in_schema=False)
-async def upload_image(payload: ImageUploadRequest):
-    """Upload Base64 image into Google Flow via connected extension."""
-    client = get_flow_client()
-    if not client.connected:
-        raise HTTPException(status_code=503, detail="No browser extension connected")
-
-    result = await client.upload_image(
-        image_base64=payload.image_base64,
-        mime_type=payload.mime_type,
-        file_name=payload.file_name or "image.jpg",
-        project_id=payload.project_id or "",
-        preferred_installation=payload.installation_id,
-    )
-    if result.get("error"):
-        raise HTTPException(status_code=502, detail=result["error"])
-
-    media_id = result.get("_mediaId") or result.get("data", {}).get("media", {}).get("name")
-    if not media_id:
-        raise HTTPException(status_code=502, detail="Failed to retrieve uploaded media ID")
-
-    active_pid = result.get("_projectId") or payload.project_id or client.active_project_id or ""
-    is_cache_hit = "1" if result.get("_cacheHit") else "0"
-
-    response_data = {
-        "media_id": media_id,
-        "installation_id": result.get("_installation_id"),
-        "file_name": payload.file_name,
-        "media": {
-            "name": media_id,
-            "projectId": active_pid,
-        },
-    }
-    return JSONResponse(
-        content=response_data,
-        headers={
-            "X-Flow-Project-Id": active_pid,
-            "X-Flow-Media-Cache-Hits": is_cache_hit,
-        },
-    )
 
 
 @router.post("/v1/images/generations", response_model=JobsResponse, status_code=status.HTTP_202_ACCEPTED)
