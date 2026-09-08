@@ -156,25 +156,38 @@ async def generate_video(body: GenerateVideoRequest):
         raise HTTPException(503, "Extension not connected")
 
     if body.model_family == "omni_flash":
-        try:
-            common = dict(
+        if USE_BATCH_RPC:
+            omni_model = f"abra_i2v_{body.duration_s}s"
+            result = await client.generate_video(
                 start_image_media_id=body.start_image_media_id,
                 prompt=body.prompt,
                 project_id=body.project_id,
                 scene_id=body.scene_id,
-                duration_s=body.duration_s,
                 aspect_ratio=body.aspect_ratio,
+                end_image_media_id=body.end_image_media_id,
                 user_paygate_tier=body.user_paygate_tier,
+                video_model=omni_model,
             )
-            if body.end_image_media_id:
-                result = await generate_omni_flash_first_last_video(
-                    end_image_media_id=body.end_image_media_id,
-                    **common,
+        else:
+            try:
+                common = dict(
+                    start_image_media_id=body.start_image_media_id,
+                    prompt=body.prompt,
+                    project_id=body.project_id,
+                    scene_id=body.scene_id,
+                    duration_s=body.duration_s,
+                    aspect_ratio=body.aspect_ratio,
+                    user_paygate_tier=body.user_paygate_tier,
                 )
-            else:
-                result = await generate_omni_flash_first_frame_video(**common)
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
+                if body.end_image_media_id:
+                    result = await generate_omni_flash_first_last_video(
+                        end_image_media_id=body.end_image_media_id,
+                        **common,
+                    )
+                else:
+                    result = await generate_omni_flash_first_frame_video(**common)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
     else:
         result = await client.generate_video(
             **body.model_dump(exclude={"model_family", "duration_s"}, exclude_none=True)
