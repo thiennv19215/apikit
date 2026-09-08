@@ -28,13 +28,14 @@ Tài liệu tổng hợp toàn bộ các endpoint của FlowKit Server, phân đ
 ---
 
 ## NHÓM 1: CLIENT BACKEND API (/v1 & Health)
-*Được thiết kế chuẩn 1:1 theo hợp đồng của `FlowProviderAPI` và MCP tool. Không cần truyền `project_id`, gửi trực tiếp ảnh Base64, tự động cân bằng tải và chọn profile tài khoản.*
+*Được thiết kế chuẩn 1:1 theo hợp đồng của `FlowProviderAPI` và MCP tool. Không cần truyền `project_id`, gửi trực tiếp ảnh Base64, tự động cân bằng tải và chọn profile tài khoản. Xem tài liệu hướng dẫn tích hợp chi tiết tại [CLIENT_V1.md](CLIENT_V1.md), cơ chế audit log tại [EXECUTION_LOGS.md](EXECUTION_LOGS.md), và bảo trì hệ thống tại [CLIENT_MAINTENANCE_INTERNAL.md](CLIENT_MAINTENANCE_INTERNAL.md).*
 
 ### 1.1. Kiểm tra Sức khỏe & Readiness Probe
 Dùng cho load balancer, Docker, Kubernetes hoặc client backend kiểm tra trước khi dispatch tác vụ.
 
 | Method | Endpoint | Mô tả | Response Code & Mẫu dữ liệu |
 |---|---|---|---|
+| `GET` | `/v1/health` | Client health check (kiểm tra readiness DB, extension capabilities, maintenance gate) | `200 OK` (hoặc `503 Service Unavailable`)<br>`{"status": "degraded", "maintenance": false, "accepting_requests": true, "capabilities": {...}}` |
 | `GET` | `/health/live` | Liveness check cơ bản | `200 OK`<br>`{"status": "ok"}` |
 | `GET` | `/health/ready` | Kiểm tra Extension sẵn sàng & tải của worker queue | `200 OK` (hoặc `503` nếu chưa có extension)<br>`{"status": "ready", "provider_accounts": 1, "video_lite_ready_accounts": 1, "jobs": {"queued": 0, "running": 0}, "active_jobs": 0, "job_queue_capacity": 200, "job_queue_remaining": 200}` |
 | `GET` | `/api/health` | Alias health cho extension & MCP | `200 OK`<br>`{"ok": true, "status": "ready", ...}` |
@@ -178,6 +179,7 @@ Hệ thống sử dụng model **Gemini Omni Flash** (`veo_3_1_i2v_lite` wire mo
 | `POST` | `/v1/jobs/status` | Body nhận danh sách `{"job_ids": ["job_1", "job_2"]}` hoặc đơn lẻ `{"job_id": "job_1"}` |
 | `GET` | `/v1/jobs/{job_id}` | Path param `job_id` |
 | `GET` | `/v1/jobs/status/{job_id}` | Alias path param |
+| `GET` | `/v1/jobs/{job_id}/executions` | Lịch sử thực thi (audit log, routing profile, thời gian bắt đầu/kết thúc) |
 
 **Kết quả khi hoàn thành (`status == "complete"`):**
 ```json
