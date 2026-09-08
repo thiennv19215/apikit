@@ -244,19 +244,19 @@ You can also pass `flow_project_id` per project on `POST /api/projects`.
 | `FLOW_ALLOW_DEGRADED` | `0` | `1` lets scene chaining and r2v fall back to plain i2v instead of failing. |
 | `DEFAULT_PAYGATE_TIER` | `PAYGATE_TIER_TWO` | Carried for the DB and dashboard; no longer selects a model. |
 
-### What does not work on the new API yet
+### What is supported on the new API
 
-Three capabilities have no captured payload, so they fail with
-`UNSUPPORTED_ON_BATCH_API` rather than quietly producing the wrong thing:
+Flow Kit fully supports the Google Flow batchexecute RPC architecture:
 
-| Capability | Status | Workaround |
+| Capability | Status | Wire Model / RPC |
 |---|---|---|
-| 4K/1080p upscale (`/fk-pipeline` last step) | unported | none — keep the 1080p render |
-| Reference-to-video (r2v) | unported | `FLOW_ALLOW_DEGRADED=1` → i2v off the first reference |
-| Start+end-frame chaining (`/fk-gen-chain-videos`) | unported | `FLOW_ALLOW_DEGRADED=1` → i2v off the start frame |
-| Omni Flash (`model_family=omni_flash`) | unported | use `model_family=veo` |
+| Text-to-Image (T2I) | Supported | `rQeaTb` / `imagen_3_5` |
+| Image-to-Video (First Frame) | Supported | `eb1hJf` / `abra_i2v_<duration>s` |
+| Start + End Frame Chaining | Supported | `nprQif` / `omni_flash_i2v_<duration>s_first_last` |
+| Reference-to-Video (R2V) | Supported | `MZZa6b` / `abra_r2v_<duration>s` |
+| Omni Flash Video | Supported | Native on all 3 video RPCs above |
+| 4K/1080p upscale (`/fk-pipeline`) | Unported | No batchexecute RPC captured yet — keep 1080p |
 
-Restoring one starts with a capture, not a guess: [`docs/CAPTURE.md`](docs/CAPTURE.md).
 
 ## End-to-End Example: "Pippip the Fish Merchant"
 
