@@ -465,20 +465,29 @@ function getNetlogUrl() {
 }
 
 // ─── Flow Payload Capture Recorder ──────────────────────────
-const _NETLOG_HOSTS = ['https://flow.google.com/_/*'];
+const _NETLOG_HOSTS = ['https://flow.google.com/*', 'https://labs.google/*'];
 const _capturedRequests = new Map();
 
 chrome.webRequest.onBeforeRequest.addListener((d) => {
+  let body = null;
   if (d.requestBody?.raw?.length) {
     try {
-      const body = new TextDecoder().decode(new Uint8Array(d.requestBody.raw[0].bytes));
-      if (body && (body.includes('eb1hJf') || body.includes('batchexecute'))) {
-        console.log('[FLOW_CAPTURE] Detected batchexecute request:', d.url);
-        _capturedRequests.set(d.requestId, { ts: new Date().toISOString(), url: d.url, body });
-      }
+      body = new TextDecoder().decode(new Uint8Array(d.requestBody.raw[0].bytes));
     } catch (e) {
-      console.warn('[FLOW_CAPTURE] Error decoding request:', e);
+      console.warn('[FLOW_CAPTURE] Error decoding raw bytes:', e);
     }
+  } else if (d.requestBody?.formData) {
+    try {
+      const freq = d.requestBody.formData['f.req'];
+      body = Array.isArray(freq) ? freq[0] : (freq || JSON.stringify(d.requestBody.formData));
+    } catch (e) {
+      console.warn('[FLOW_CAPTURE] Error parsing formData:', e);
+    }
+  }
+
+  if (body) {
+    console.log('[FLOW_CAPTURE] Captured request to:', d.url);
+    _capturedRequests.set(d.requestId, { ts: new Date().toISOString(), url: d.url, body });
   }
 }, { urls: _NETLOG_HOSTS }, ['requestBody']);
 
