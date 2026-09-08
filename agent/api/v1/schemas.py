@@ -89,7 +89,7 @@ class VideoGenerationRequest(BaseModel):
     input_images: list[InlineImageInput] = Field(default_factory=list)
     aspect_ratio: str = "VIDEO_ASPECT_RATIO_LANDSCAPE"
     duration_seconds: Literal[4, 6, 8, 10] = 8
-    model: str | None = "veo_3_1_i2v_lite"
+    model: Literal["omni_flash"] | None = "omni_flash"
     quality: str | None = None
     mode: str | None = None
     model_family: str | None = None
@@ -118,8 +118,11 @@ class VideoGenerationRequest(BaseModel):
             raise ValueError("generation_type and type must agree")
         value = canonical(preferred if preferred is not None else legacy or "image_to_video")
         data["type"] = data["generation_type"] = value
-        if not data.get("model"):
-            data["model"] = data.get("mode") or data.get("model_family") or data.get("quality") or "veo_3_1_i2v_lite"
+        requested_model = data.get("model") or data.get("mode") or data.get("model_family") or "omni_flash"
+        if isinstance(requested_model, str) and requested_model.strip().lower() in {"omni", "flash", "lite", "omni_flash"}:
+            data["model"] = "omni_flash"
+        else:
+            raise ValueError("Client video supports only model=omni_flash")
         if value not in ("image_to_video", "reference_to_video"):
             raise ValueError("Use image_to_video (first or first+last) or reference_to_video")
         return data

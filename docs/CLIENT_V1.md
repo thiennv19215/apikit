@@ -90,10 +90,10 @@ Alias model không phân biệt hoa/thường: `pro`, `bananapro`, `banana_pro` 
 
 Contract client yêu cầu `model="omni_flash"`, không cung cấp lựa chọn model video khác.
 
-**Chưa hoàn tất tích hợp thực thi.** Các ví dụ dưới đây mô tả contract cần tích hợp,
-không phải cam kết đã chạy. Worker v1 chưa nối module Omni thật và polling của nó;
-transport hiện tại chưa có payload Omni tương thích. Không được dùng model khác
-thay thế hoặc bỏ end frame/reference rồi coi request là thành công.
+**First-frame đã tích hợp thực thi** qua batch RPC với model `abra_i2v_<duration>s`.
+Start–End và reference-to-video chưa có payload Flow batch được capture/kiểm chứng,
+nên backend trả lỗi rõ ràng (`OMNI_START_END_NOT_CAPTURED` hoặc
+`OMNI_R2V_NOT_CAPTURED`), tuyệt đối không đổi sang Veo hoặc bỏ ảnh đầu vào.
 
 | Chế độ | `generation_type` | Ảnh đầu vào |
 |---|---|---|
@@ -105,7 +105,7 @@ Module Omni có thời lượng 4/6/8/10 giây và tỷ lệ `16:9`/`9:16`.
 `generation_type` là tên ưu tiên, `type` là alias cũ; gửi hai giá trị khác nhau trả 422.
 Thoại mô tả trong `prompt`; chưa có công tắc `dialogue` hoạt động.
 
-Ví dụ First+Last (chưa sẵn sàng chạy):
+Ví dụ First+Last (contract, hiện sẽ trả lỗi chưa-capture):
 
 ```json
 {

@@ -473,7 +473,9 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
         end_media_id = payload.get("end_media_id")
         ref_media_ids = list(payload.get("reference_media_ids") or [])
         input_images = payload.get("input_images") or []
-        video_model = payload.get("model") or payload.get("quality")
+        video_model = payload.get("model") or "omni_flash"
+        if video_model != "omni_flash":
+            return {"error": "INVALID_ARGUMENT: client v1 video supports only omni_flash"}
 
         # Auto-upload Base64 or collect media_ids
         uploaded_mids = []
@@ -534,6 +536,13 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
 
         is_ref_based = req_type == "GENERATE_VIDEO_REFS" or bool(ref_media_ids)
 
+        # The current batch capture is verified for Abra first-frame I2V only.
+        # Do not drop frames/references or route the request to Veo.
+        if is_ref_based:
+            return {"error": "OMNI_R2V_NOT_CAPTURED: Abra reference-to-video requires a captured Flow batch payload"}
+        if end_media_id:
+            return {"error": "OMNI_START_END_NOT_CAPTURED: Abra first+last requires a captured Flow batch payload"}
+
         if video_model == "omni_flash" or payload.get("mode") == "omni":
             try:
                 import importlib
@@ -549,28 +558,19 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
                 pass
 
         if is_ref_based and ref_media_ids:
-            submit_result = await client.generate_video_from_references(
-                reference_media_ids=ref_media_ids,
-                prompt=prompt,
-                project_id=pid,
-                scene_id="",
-                aspect_ratio=aspect_ratio,
-                video_model=video_model,
-                preferred_installation=inst_id,
-            )
-        else:
-            if not start_media_id:
-                return {"error": "Video generation requires start_media_id or input_images"}
-            submit_result = await client.generate_video(
-                start_image_media_id=start_media_id,
-                prompt=prompt,
-                project_id=pid,
-                scene_id="",
-                aspect_ratio=aspect_ratio,
-                end_image_media_id=end_media_id,
-                video_model=video_model,
-                preferred_installation=inst_id,
-            )
+            return {"error": "OMNI_R2V_NOT_CAPTURED: Abra reference-to-video requires a captured Flow batch payload"}
+        if not start_media_id:
+            return {"error": "Video generation requires start_media_id or input_images"}
+        duration = payload.get("duration_seconds", 8)
+        submit_result = await client.generate_video(
+            start_image_media_id=start_media_id,
+            prompt=prompt,
+            project_id=pid,
+            scene_id="",
+            aspect_ratio=aspect_ratio,
+            video_model=f"abra_i2v_{duration}s",
+            preferred_installation=inst_id,
+        )
 
         if _is_error(submit_result):
             return submit_result

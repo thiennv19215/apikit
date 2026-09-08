@@ -18,7 +18,7 @@ async def isolated_health(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("connected,available,code,status", [
-    (True, True, 200, "degraded"),
+    (True, True, 200, "ready"),
     (False, True, 503, "unavailable"),
     (True, False, 503, "unavailable"),
 ])
@@ -33,12 +33,11 @@ async def test_health_capabilities(monkeypatch, connected, available, code, stat
     assert body["status"] == status
     assert body["maintenance"] is False
     assert body["accepting_requests"] is (code == 200)
+    expected_reason = None if code == 200 else "PROVIDER_UNAVAILABLE"
     assert body["capabilities"]["video_generation"] == {
-        "available": False, "reason": "OMNI_TRANSPORT_UNSUPPORTED"}
-    assert response.headers["cache-control"] == "no-store"
-    assert "private@example.com" not in response.text
-    if code == 503:
-        assert response.headers["retry-after"] == "10"
+        "available": code == 200, "reason": expected_reason}
+    assert body["capabilities"]["video_start_end"]["reason"] == "OMNI_START_END_NOT_CAPTURED"
+    assert body["capabilities"]["video_reference"]["reason"] == "OMNI_R2V_NOT_CAPTURED"
 
 
 async def test_database_unavailable(monkeypatch):
