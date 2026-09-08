@@ -837,17 +837,6 @@ class FlowClient:
                 start_image_media_id, prompt, project_id, scene_id,
                 aspect_ratio, end_image_media_id, user_paygate_tier)
 
-        if end_image_media_id:
-            if not FLOW_ALLOW_DEGRADED:
-                return {"error": _unsupported(
-                    "start+end frame chaining",
-                    "the new payload's end-image slot was never captured",
-                )}
-            logger.warning(
-                "Scene %s: dropping end frame %s — chaining is not on the batch path, "
-                "running plain i2v because FLOW_ALLOW_DEGRADED=1",
-                str(scene_id)[:12], end_image_media_id[:12])
-
         cand_ws = self._select_extension(
             require_token=False,
             preferred_installation=preferred_installation,
@@ -856,18 +845,32 @@ class FlowClient:
         target_inst = preferred_installation or (
             self._extensions[cand_ws].get("installation_id") if cand_ws in self._extensions else None
         )
-        gen_type = "start_end_frame_2_video" if end_image_media_id else "frame_2_video"
         try:
             pid = self._batch_project_id(project_id, preferred_installation=target_inst)
-            freq = fb.video_request(
-                prompt, pid, start_image_media_id, aspect=aspect_ratio,
-                model=self._batch_video_model(user_paygate_tier, gen_type, aspect_ratio, override=video_model),
-            )
-            payload = await self._batch_payload(
-                fb.RPC_GEN_VIDEO, freq, fb.CAPTCHA_VIDEO, timeout=120,
-                preferred_installation=target_inst,
-                preferred_project_id=pid,
-            )
+            if end_image_media_id:
+                model = fb.resolve_video_model(video_model or "omni_flash_i2v_8s_first_last")
+                if "first_last" not in model:
+                    d = "4s" if "4" in model else ("6s" if "6" in model else ("10s" if "10" in model else "8s"))
+                    model = f"omni_flash_i2v_{d}_first_last"
+                freq = fb.video_start_end_request(
+                    prompt, pid, start_image_media_id, end_image_media_id,
+                    aspect=aspect_ratio, model=model,
+                )
+                payload = await self._batch_payload(
+                    fb.RPC_GEN_VIDEO_START_END, freq, fb.CAPTCHA_VIDEO, timeout=120,
+                    preferred_installation=target_inst,
+                    preferred_project_id=pid,
+                )
+            else:
+                freq = fb.video_request(
+                    prompt, pid, start_image_media_id, aspect=aspect_ratio,
+                    model=fb.resolve_video_model(video_model or "abra_i2v_8s"),
+                )
+                payload = await self._batch_payload(
+                    fb.RPC_GEN_VIDEO, freq, fb.CAPTCHA_VIDEO, timeout=120,
+                    preferred_installation=target_inst,
+                    preferred_project_id=pid,
+                )
             operation = fb.read_operation(payload)
         except Exception as e:
             return _batch_error(e)

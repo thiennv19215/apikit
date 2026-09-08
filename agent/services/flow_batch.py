@@ -37,6 +37,7 @@ MEDIA_HOST = "flow-content.google"
 RPC_GEN_IMAGE = "ogiZ0b"
 RPC_GEN_VIDEO = "eb1hJf"
 RPC_GEN_VIDEO_REFS = "MZZa6b"
+RPC_GEN_VIDEO_START_END = "nprQif"
 RPC_OPERATION = "jwpduf"
 RPC_PROJECT_MEDIA = "Zzl0ze"
 RPC_MEDIA = "as29s"
@@ -104,6 +105,10 @@ VIDEO_MODELS = {
     "abra_r2v_6s",
     "abra_r2v_8s",
     "abra_r2v_10s",
+    "omni_flash_i2v_4s_first_last",
+    "omni_flash_i2v_6s_first_last",
+    "omni_flash_i2v_8s_first_last",
+    "omni_flash_i2v_10s_first_last",
 }
 
 #: Video aspect, and note it does NOT share the image encoding: here 1 is
@@ -227,6 +232,9 @@ def resolve_video_model(key: Optional[str]) -> str:
             return k
         if "ultra" in k or "pro" in k:
             return "veo_3_1_i2v_s_fast_ultra"
+        if "first_last" in k or "start_end" in k:
+            d = "4s" if "4" in k else ("6s" if "6" in k else ("10s" if "10" in k else "8s"))
+            return f"omni_flash_i2v_{d}_first_last"
         if "abra" in k or "omni" in k or "flash" in k or "r2v" in k:
             prefix = "abra_r2v_" if ("r2v" in k or "ref" in k) else "abra_i2v_"
             if "4" in k:
@@ -407,6 +415,31 @@ def video_refs_request(prompt: str, project_id: str,
         [_client_uuid(), 2],
     ]
     return build_envelope(RPC_GEN_VIDEO_REFS, inner)
+
+
+def video_start_end_request(prompt: str, project_id: str,
+                            start_media_id: str, end_media_id: str,
+                            start_crop: Optional[list] = None,
+                            end_crop: Optional[list] = None,
+                            aspect: Any = VIDEO_ASPECT_PORTRAIT,
+                            model: str = "omni_flash_i2v_8s_first_last") -> str:
+    """Build envelope for Start + End frame video generation via RPC nprQif."""
+    inner = [
+        [[
+            [None, None, [[[prompt]]]],
+            model,
+            resolve_video_aspect(aspect),
+            None,
+            [None, start_media_id, None, None, None,
+             FULL_FRAME_CROP if start_crop is None else start_crop],
+            [None, end_media_id, None, None, None,
+             FULL_FRAME_CROP if end_crop is None else end_crop],
+            [None, None, None, None, _client_uuid(), _client_uuid()]
+        ]],
+        _context(project_id),
+        [_client_uuid(), 2],
+    ]
+    return build_envelope(RPC_GEN_VIDEO_START_END, inner)
 
 
 def upload_request(image_b64: str, project_id: str, mime_type: str = "image/jpeg",

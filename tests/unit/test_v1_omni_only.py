@@ -52,14 +52,21 @@ async def test_v1_r2v_uses_abra_r2v(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_v1_start_end_not_captured(monkeypatch):
+async def test_v1_start_end_uses_omni_flash_first_last(monkeypatch):
     async def owner(_):
         return {"installation_id": "install", "project_id": "project"}
     monkeypatch.setattr("agent.services.execution_audit.media_owner", owner)
-    client = SimpleNamespace(generate_video=AsyncMock(), generate_video_from_references=AsyncMock())
+    client = SimpleNamespace(
+        upload_image=AsyncMock(),
+        generate_video=AsyncMock(return_value={"error": "stop"}),
+        generate_video_from_references=AsyncMock(),
+    )
     result = await _dispatch_client_v1({"id": "job", "type": "GENERATE_VIDEO", "payload_json": json.dumps({
-        "prompt": "x", "model": "omni_flash", "start_media_id": "start", "end_media_id": "end",
-    })}, "HORIZONTAL", SimpleNamespace(_client=client))
-    assert "OMNI_START_END_NOT_CAPTURED" in result["error"]
-    client.generate_video.assert_not_awaited()
+        "prompt": "x", "model": "omni_flash", "duration_seconds": 4,
+        "start_media_id": "start", "end_media_id": "end",
+    })}, "VERTICAL", SimpleNamespace(_client=client))
+    assert result["error"] == "stop"
+    assert client.generate_video.await_args.kwargs["video_model"] == "omni_flash_i2v_4s_first_last"
+    assert client.generate_video.await_args.kwargs["start_image_media_id"] == "start"
+    assert client.generate_video.await_args.kwargs["end_image_media_id"] == "end"
     client.generate_video_from_references.assert_not_awaited()

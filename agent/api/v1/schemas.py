@@ -107,7 +107,8 @@ class VideoGenerationRequest(BaseModel):
         data = dict(data)
         aliases = {"i2v": "image_to_video", "r2v": "reference_to_video",
                    "ingredients": "reference_to_video", "references": "reference_to_video",
-                   "omni": "reference_to_video"}
+                   "omni": "reference_to_video", "start_end": "image_to_video",
+                   "first_last": "image_to_video", "start_end_frame_2_video": "image_to_video"}
         def canonical(value):
             if value is not None and not isinstance(value, str):
                 raise ValueError("generation_type and type must be strings")

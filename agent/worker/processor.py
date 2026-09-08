@@ -529,16 +529,26 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
 
         if uploaded_mids:
             if not start_media_id:
-                start_media_id = uploaded_mids[0]
-                if len(uploaded_mids) > 1:
-                    ref_media_ids.extend(uploaded_mids[1:])
+                if len(uploaded_mids) == 2 and not is_ref_based and (
+                    payload.get("generation_type") in ("start_end", "first_last")
+                    or payload.get("type") in ("start_end", "first_last")
+                ):
+                    start_media_id = uploaded_mids[0]
+                    end_media_id = uploaded_mids[1]
+                else:
+                    start_media_id = uploaded_mids[0]
+                    if len(uploaded_mids) > 1:
+                        ref_media_ids.extend(uploaded_mids[1:])
             else:
-                ref_media_ids.extend(uploaded_mids)
+                if not end_media_id and len(uploaded_mids) == 1 and (
+                    payload.get("generation_type") in ("start_end", "first_last")
+                    or payload.get("type") in ("start_end", "first_last")
+                ):
+                    end_media_id = uploaded_mids[0]
+                else:
+                    ref_media_ids.extend(uploaded_mids)
 
         is_ref_based = req_type == "GENERATE_VIDEO_REFS" or bool(ref_media_ids)
-
-        if end_media_id:
-            return {"error": "OMNI_START_END_NOT_CAPTURED: Abra first+last requires a captured Flow batch payload"}
 
         if video_model == "omni_flash" or payload.get("mode") == "omni":
             try:
@@ -563,6 +573,17 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
                 scene_id="",
                 aspect_ratio=aspect_ratio,
                 video_model=f"abra_r2v_{duration}s",
+                preferred_installation=inst_id,
+            )
+        elif start_media_id and end_media_id:
+            submit_result = await client.generate_video(
+                start_image_media_id=start_media_id,
+                end_image_media_id=end_media_id,
+                prompt=prompt,
+                project_id=pid,
+                scene_id="",
+                aspect_ratio=aspect_ratio,
+                video_model=f"omni_flash_i2v_{duration}s_first_last",
                 preferred_installation=inst_id,
             )
         else:

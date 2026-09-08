@@ -137,22 +137,18 @@ class TestGenerateVideo:
         await client.generate_video("mid", "go", PROJECT, "scene-1")
         assert client._operation_projects[OPERATION] == PROJECT
 
-    async def test_chaining_fails_loudly_rather_than_dropping_the_end_frame(self, client):
-        result = await client.generate_video("mid", "go", PROJECT, "scene-1",
-                                             end_image_media_id="end-mid")
-        assert "UNSUPPORTED_ON_BATCH_API" in result["error"]
-        assert not client.calls, "nothing should have been sent"
-
-    async def test_degraded_mode_runs_i2v_off_the_start_frame(self, client, monkeypatch):
-        import agent.services.flow_client as module
-        monkeypatch.setattr(module, "FLOW_ALLOW_DEGRADED", True)
-        client.responses[fb.RPC_GEN_VIDEO] = self._submitted(client)
-
+    async def test_start_end_uses_batch_rpc(self, client):
+        client.responses[fb.RPC_GEN_VIDEO_START_END] = {
+            "data": envelope(fb.RPC_GEN_VIDEO_START_END, [None, 50, [[OPERATION, PROJECT, "scene", None]]])
+        }
         result = await client.generate_video("start-mid", "go", PROJECT, "scene-1",
                                              end_image_media_id="end-mid")
         assert not _is_error(result)
+        assert client.calls[0]["rpcid"] == fb.RPC_GEN_VIDEO_START_END
         payload = json.loads(json.loads(client.calls[0]["freq"])[0][0][1])
         assert payload[0][0][4][1] == "start-mid"
+        assert payload[0][0][5][1] == "end-mid"
+        assert payload[0][0][1] == "omni_flash_i2v_8s_first_last"
 
     async def test_r2v_uses_batch_rpc(self, client):
         client.responses[fb.RPC_GEN_VIDEO_REFS] = {
