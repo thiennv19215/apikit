@@ -7,7 +7,7 @@ import uuid
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import RedirectResponse
 
-from agent.api.v1.generations import _resolve_jobs_response
+from agent.api.v1.generations import _resolve_jobs_response, _normalize_image_aspect, _normalize_video_aspect
 from agent.api.v1.schemas import (
     CharacterCreateRequest,
     CharacterImageGenerationRequest,
@@ -15,6 +15,7 @@ from agent.api.v1.schemas import (
     CharacterUpdateRequest,
     CharacterVideoGenerationRequest,
     JobsResponse,
+    normalize_image_model,
 )
 from agent.db import crud
 from agent.db.schema import get_db, _db_lock
@@ -35,7 +36,7 @@ def _as_character_response(row: dict) -> CharacterResponse:
         description=row.get("description") or "",
         image_prompt=row.get("image_prompt") or "",
         voice_description=row.get("voice_description"),
-        image_model=row.get("image_model") or "pro",
+        image_model=normalize_image_model(row.get("image_model") or "NANO_BANANA_PRO"),
         aspect_ratio=row.get("aspect_ratio"),
         reference_media_ids=ref_ids,
         media_id=mid,
@@ -73,6 +74,7 @@ async def create_character(body: CharacterCreateRequest):
         name=body.name,
         description=body.description or "",
         image_prompt=body.image_prompt or "",
+        voice_description=body.voice_description,
         entity_type=entity_type,
         media_id=media_id,
         reference_image_url=ref_url,
@@ -145,7 +147,7 @@ async def generate_character_image(character_id: str, body: CharacterImageGenera
         raise HTTPException(status_code=404, detail="Character not found")
 
     job_id = f"job_{uuid.uuid4().hex[:16]}"
-    aspect = "IMAGE_ASPECT_RATIO_LANDSCAPE" if "16:9" in body.aspect_ratio else "IMAGE_ASPECT_RATIO_PORTRAIT"
+    aspect = _normalize_image_aspect(body.aspect_ratio)
     orientation = "HORIZONTAL" if "LANDSCAPE" in aspect else "VERTICAL"
 
     ref_media_ids = list(body.reference_media_ids) if body.reference_media_ids else []
@@ -189,7 +191,7 @@ async def generate_character_video(character_id: str, body: CharacterVideoGenera
         raise HTTPException(status_code=404, detail="Character not found")
 
     job_id = f"job_{uuid.uuid4().hex[:16]}"
-    aspect = "VIDEO_ASPECT_RATIO_LANDSCAPE" if "16:9" in body.aspect_ratio else "VIDEO_ASPECT_RATIO_PORTRAIT"
+    aspect = _normalize_video_aspect(body.aspect_ratio)
     orientation = "HORIZONTAL" if "LANDSCAPE" in aspect else "VERTICAL"
 
     payload_dict = {

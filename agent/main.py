@@ -27,6 +27,7 @@ from agent.api.providers import router as providers_router
 from agent.api.active_project import router as active_project_router
 from agent.api.v1.generations import router as v1_generations_router
 from agent.api.v1.characters import router as v1_characters_router
+from agent.api.v1.health import router as v1_health_router, maintenance_response
 from agent.worker.processor import get_worker_controller
 from agent.services.flow_client import get_flow_client
 from agent.services.event_bus import event_bus
@@ -162,6 +163,22 @@ app.include_router(providers_router)
 app.include_router(active_project_router)
 app.include_router(v1_generations_router)
 app.include_router(v1_characters_router)
+app.include_router(v1_health_router)
+
+
+@app.middleware("http")
+async def client_maintenance_gate(request: Request, call_next):
+    from agent import config
+    # Keep health and existing job polling available during maintenance.
+    if (config.CLIENT_MAINTENANCE
+            and request.url.path.startswith("/v1/")
+            and request.method in {"POST", "PUT", "PATCH", "DELETE"}
+            and request.url.path.rstrip("/") != "/v1/jobs/status"):
+        return JSONResponse(
+            status_code=503, content=maintenance_response().model_dump(),
+            headers={"Retry-After": "60", "Cache-Control": "no-store"},
+        )
+    return await call_next(request)
 
 
 import secrets as _secrets
@@ -207,16 +224,19 @@ async def health():
 def _get_provider_status_dict():
     client = get_flow_client()
     connected = client.connected
-    active_accounts = len(client._accounts) if hasattr(client, "_accounts") and client._accounts else (1 if connected else 0)
+    # The live connection pool is maintained by FlowClient, not _accounts.
+    extensions = client.list_extensions()
+    active_accounts = len(extensions)
+    available_accounts = sum(bool(ext["available"]) for ext in extensions)
     controller = get_worker_controller()
     active_count = controller.active_count if controller else 0
     capacity = 200
-    status_str = "ready" if connected else "waiting_for_provider"
+    status_str = "ready" if connected and available_accounts else "waiting_for_provider"
     return {
         "status": status_str,
         "project_store": "ready",
         "provider_accounts": active_accounts,
-        "video_lite_ready_accounts": active_accounts,
+        "video_lite_ready_accounts": available_accounts,
         "jobs": {"queued": 0, "dispatching": active_count, "running": active_count},
         "active_jobs": active_count,
         "job_queue_capacity": capacity,

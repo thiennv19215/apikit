@@ -5,11 +5,12 @@ from pathlib import Path
 
 # ─── Paths ───────────────────────────────────────────────────
 BASE_DIR = Path(os.environ.get("FLOW_AGENT_DIR", Path(__file__).parent.parent))
-DB_PATH = BASE_DIR / "flow_agent.db"
+DB_PATH = Path(os.environ.get("FLOW_DB_PATH", BASE_DIR / "flow_agent.db"))
 
 # ─── API Server ──────────────────────────────────────────────
 API_HOST = os.environ.get("API_HOST", "127.0.0.1")
 API_PORT = int(os.environ.get("API_PORT", "8100"))
+CLIENT_MAINTENANCE = os.environ.get("CLIENT_MAINTENANCE", "0").lower() in ("1", "true", "yes")
 
 # ─── WebSocket Server (extension connects here) ─────────────
 WS_HOST = os.environ.get("WS_HOST", "127.0.0.1")

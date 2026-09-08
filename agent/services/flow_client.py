@@ -164,6 +164,8 @@ class FlowClient:
                 else session.get("connected_at")
             )
             available = session.get("unavailable_until", 0) <= now
+            if not available:
+                continue
             matches_project = bool(
                 preferred_project_id
                 and session.get("flow_project_id") == preferred_project_id
@@ -501,10 +503,17 @@ class FlowClient:
             preferred_installation=preferred_installation,
             preferred_project_id=preferred_project_id,
         )
+        # A payload built for a profile's project/media cannot be replayed on
+        # another account. Retry the complete job to rebuild its inputs instead.
+        if preferred_installation:
+            extension_candidates = [ws for ws in extension_candidates
+                                    if self._extensions[ws].get("installation_id") == preferred_installation]
+            if not extension_candidates:
+                return {"error": "PROFILE_UNAVAILABLE: bound media profile is disconnected or cooling down"}
         if not extension_candidates and needs_token:
             return {"error": "NO_FLOW_KEY"}
         if not extension_candidates:
-            return {"error": "Extension not connected"}
+            return {"error": "Extension not connected: no available profile (cooldown)"}
 
         last_result = {"error": "Extension not connected"}
         for index, extension_ws in enumerate(extension_candidates):
@@ -512,6 +521,9 @@ class FlowClient:
                 continue
 
             session = self._extensions[extension_ws]
+            from agent.services.execution_audit import start_call, finish_call
+            call_id = await start_call(params.get("rpcid") or method,
+                                       session.get("installation_id"), preferred_project_id)
             self._extension_ws = extension_ws
             self._flow_key = session.get("flow_key")
             req_id = str(uuid.uuid4())
@@ -538,11 +550,16 @@ class FlowClient:
                 self._pending_ws.pop(req_id, None)
 
             has_alternative = index + 1 < len(extension_candidates)
-            if self._should_failover(last_result) and has_alternative:
+            try:
+                await finish_call(call_id, last_result)
+            except Exception:
+                logger.exception("Could not finalize execution audit %s", call_id)
+            if self._should_failover(last_result):
                 if extension_ws in self._extensions:
                     self._extensions[extension_ws]["unavailable_until"] = (
                         time.time() + 60
                     )
+            if self._should_failover(last_result) and has_alternative:
                 logger.warning(
                     "Extension profile unavailable for %s; retrying through "
                     "another authenticated profile",
@@ -551,6 +568,8 @@ class FlowClient:
                 continue
 
             if isinstance(last_result, dict):
+                if call_id:
+                    last_result["_execution_id"] = call_id
                 inst_id = session.get("installation_id")
                 if inst_id and "_installation_id" not in last_result:
                     last_result["_installation_id"] = inst_id
@@ -619,7 +638,12 @@ class FlowClient:
         )
         if result.get("error"):
             raise fb.FlowBatchError(f"{rpcid}: {result['error']}")
-        return fb.first_payload(result.get("data") or "", rpcid)
+        try:
+            return fb.first_payload(result.get("data") or "", rpcid)
+        except Exception as exc:
+            from agent.services.execution_audit import finish_call
+            await finish_call(result.get("_execution_id"), {"error": str(exc)})
+            raise
 
     @property
     def active_project_id(self) -> str:
@@ -765,7 +789,11 @@ class FlowClient:
         images = fb.read_images(payload)
         if not images:
             return {"status": 502, "error": "Image generation returned no media url"}
-        return {"status": 200, "data": {"media": [_as_media_record(i) for i in images]}}
+        records = [_as_media_record(i) for i in images]
+        from agent.services.execution_audit import remember_media
+        for record in records:
+            await remember_media(record.get("name"), target_inst, pid)
+        return {"status": 200, "data": {"media": records}, "_installation_id": target_inst}
 
     async def edit_image(self, prompt: str, source_media_id: str,
                           project_id: str,
@@ -845,13 +873,15 @@ class FlowClient:
             return _batch_error(e)
 
         self._remember_operation(operation.operation_id, pid, installation_id=target_inst)
-        return {"status": 200, "data": {"operations": [_as_pending_operation(operation.operation_id)]}}
+        return {"status": 200, "data": {"operations": [_as_pending_operation(operation.operation_id)]},
+                "_installation_id": target_inst}
 
     async def generate_video_from_references(self, reference_media_ids: list[str],
                                               prompt: str, project_id: str, scene_id: str,
                                               aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
                                               user_paygate_tier: str = "PAYGATE_TIER_TWO",
-                                              video_model: str | None = None) -> dict:
+                                              video_model: str | None = None,
+                                              preferred_installation: str | None = None) -> dict:
         """Generate video from multiple reference images (r2v)."""
         if not USE_BATCH_RPC:
             return await self._legacy_generate_video_from_references(
@@ -873,6 +903,7 @@ class FlowClient:
             start_image_media_id=reference_media_ids[0], prompt=prompt,
             project_id=project_id, scene_id=scene_id, aspect_ratio=aspect_ratio,
             user_paygate_tier=user_paygate_tier, video_model=video_model,
+            preferred_installation=preferred_installation,
         )
 
     async def upscale_video(self, media_id: str, scene_id: str,
@@ -1067,7 +1098,13 @@ class FlowClient:
         from agent.db import crud
 
         if not USE_BATCH_RPC:
-            return await self._legacy_upload_image(image_base64, mime_type, project_id, file_name)
+            result = await self._legacy_upload_image(image_base64, mime_type, project_id, file_name,
+                                                     preferred_installation=preferred_installation)
+            if result.get("_mediaId") and preferred_installation:
+                from agent.services.execution_audit import remember_media
+                await remember_media(result["_mediaId"], preferred_installation, project_id)
+                result.update(_installation_id=preferred_installation, _projectId=project_id)
+            return result
         cand_ws = self._select_extension(
             require_token=False,
             preferred_installation=preferred_installation,
@@ -1081,7 +1118,8 @@ class FlowClient:
 
             # Check Media Cache before making network request to Google Flow
             clean_b64 = image_base64.split(",")[-1].strip()
-            img_hash = hashlib.sha256(clean_b64.encode("utf-8")).hexdigest()
+            # Include account identity so another profile never reuses this UUID.
+            img_hash = hashlib.sha256(((target_inst or "") + ":" + clean_b64).encode("utf-8")).hexdigest()
             try:
                 cached_mid = await crud.get_cached_media_id(img_hash, pid)
                 if cached_mid:
@@ -1093,6 +1131,7 @@ class FlowClient:
                         "_mediaId": cached_mid,
                         "_projectId": pid,
                         "_cacheHit": True,
+                        "_installation_id": target_inst,
                     }
             except Exception as e:
                 logger.warning("Media cache lookup error: %s", e)
@@ -1114,12 +1153,15 @@ class FlowClient:
                     logger.warning("Media cache save error: %s", e)
         except Exception as e:
             return _batch_error(e)
+        from agent.services.execution_audit import remember_media
+        await remember_media(media_id, target_inst, pid)
         return {
             "status": 200,
             "data": {"media": {"name": media_id}},
             "_mediaId": media_id,
             "_projectId": pid,
             "_cacheHit": False,
+            "_installation_id": target_inst,
         }
 
     # ─── Legacy REST methods (aisandbox-pa, pre-migration) ───
@@ -1396,7 +1438,8 @@ class FlowClient:
         }, timeout=15)
 
     async def _legacy_upload_image(self, image_base64: str, mime_type: str = "image/jpeg",
-                            project_id: str = "", file_name: str = "image.jpg") -> dict:
+                            project_id: str = "", file_name: str = "image.jpg",
+                            preferred_installation: str | None = None) -> dict:
         """Upload an image for use as start/end frame.
 
         Uses /v1/flow/uploadImage endpoint.
@@ -1421,7 +1464,8 @@ class FlowClient:
             "method": "POST",
             "headers": random_headers(),
             "body": body,
-        }, timeout=60)
+        }, timeout=60, **({"preferred_installation": preferred_installation,
+                          "preferred_project_id": project_id} if preferred_installation else {}))
 
         # Extract media.name for convenience (used as mediaId in video gen)
         if not _is_ws_error(result):

@@ -13,6 +13,7 @@ services:
       - API_PORT=8100
       - WS_HOST=0.0.0.0
       - WS_PORT=9222
+      - FLOW_DB_PATH=/app/data/flow_agent.db
       - FLOW_PROJECT_ID=${FLOW_PROJECT_ID:-}
       - FLOW_ALLOW_DEGRADED=1
 

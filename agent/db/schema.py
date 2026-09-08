@@ -165,6 +165,23 @@ CREATE TABLE IF NOT EXISTS request (
 );
 
 CREATE INDEX IF NOT EXISTS idx_scene_video ON scene(video_id);
+CREATE TABLE IF NOT EXISTS execution_log (
+    id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL,
+    method TEXT NOT NULL,
+    installation_id TEXT,
+    project_id TEXT,
+    status TEXT NOT NULL,
+    error_code TEXT,
+    started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_execution_job ON execution_log(job_id);
+CREATE TABLE IF NOT EXISTS media_owner (
+    media_id TEXT PRIMARY KEY,
+    installation_id TEXT NOT NULL,
+    project_id TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_scene_order ON scene(video_id, display_order);
 CREATE INDEX IF NOT EXISTS idx_request_status ON request(status);
 CREATE INDEX IF NOT EXISTS idx_request_scene ON request(scene_id);

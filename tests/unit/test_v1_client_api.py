@@ -27,12 +27,12 @@ class FakeOps:
         self.generated_videos = []
         self._client = self
 
-    async def upload_image(self, image_base64, mime_type="image/jpeg", project_id="0", file_name="image.jpg"):
+    async def upload_image(self, image_base64, mime_type="image/jpeg", project_id="0", file_name="image.jpg", preferred_installation=None):
         self.uploaded.append({"base64": image_base64, "mime": mime_type})
         return {"status": 200, "_mediaId": "media-uuid-1234"}
 
     async def generate_images(self, prompt, project_id="0", aspect_ratio="IMAGE_ASPECT_RATIO_LANDSCAPE",
-                              character_media_ids=None, image_model=None):
+                              character_media_ids=None, image_model=None, preferred_installation=None):
         self.generated_images.append({
             "prompt": prompt, "aspect": aspect_ratio, "refs": character_media_ids, "model": image_model
         })
@@ -137,7 +137,7 @@ async def test_video_generation_endpoint_and_status():
         # Submit Video Generation
         resp = await ac.post("/v1/videos/generations", json={
             "prompt": "Cybernetic tiger leaps forward",
-            "type": "text_to_video",
+            "type": "image_to_video",
             "aspect_ratio": "9:16",
             "input_images": [
                 {"image_base64": "aGVsbG8=", "mime_type": "image/jpeg"}
@@ -279,4 +279,3 @@ async def test_multi_job_status_and_character_reference_image():
         assert batch_data["jobs"][0]["status"] == "queued"
         assert batch_data["jobs"][1]["status"] == "failed"
         assert batch_data["jobs"][1]["error"]["code"] == "JOB_NOT_FOUND"
-

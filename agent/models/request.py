@@ -33,6 +33,7 @@ class RequestCreate(BaseModel):
 
 class Request(BaseModel):
     id: str
+    installation_id: Optional[str] = None
     project_id: Optional[str] = None
     video_id: Optional[str] = None
     scene_id: Optional[str] = None

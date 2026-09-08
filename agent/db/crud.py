@@ -348,7 +348,7 @@ async def get_cached_media_id(image_hash: str, project_id: str = "0") -> str | N
     pid = project_id or "0"
     async with _db_lock:
         cur = await db.execute(
-            "SELECT media_id FROM media_cache WHERE image_hash = ? AND (project_id = ? OR project_id = '0')",
+            "SELECT media_id FROM media_cache WHERE image_hash = ? AND project_id = ?",
             (image_hash, pid),
         )
         row = await cur.fetchone()

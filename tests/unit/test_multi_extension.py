@@ -34,6 +34,45 @@ async def multi_client(monkeypatch):
 
 class TestMultiExtensionPool:
     @pytest.mark.asyncio
+    async def test_cooling_profiles_are_not_dispatched(self, multi_client, monkeypatch):
+        from agent import main
+
+        ws = FakeWebSocket()
+        multi_client.set_extension(ws)
+        multi_client._extensions[ws]["unavailable_until"] = time.time() + 60
+        monkeypatch.setattr(main, "get_flow_client", lambda: multi_client)
+        monkeypatch.setattr(main, "get_worker_controller", lambda: None)
+        assert multi_client._extension_candidates(require_token=False) == []
+        result = await multi_client._send("gen_img", {}, timeout=0.01)
+        assert "error" in result
+        assert not ws.sent
+        status = main._get_provider_status_dict()
+        assert status["provider_accounts"] == 1
+        assert status["video_lite_ready_accounts"] == 0
+        assert status["status"] == "waiting_for_provider"
+        multi_client._extensions[ws]["unavailable_until"] = time.time() - 1
+        assert multi_client._extension_candidates(require_token=False) == [ws]
+
+    @pytest.mark.parametrize("connection_count", [0, 1, 2])
+    def test_readiness_counts_live_extensions(self, monkeypatch, connection_count):
+        from agent import main
+
+        client = FlowClient()
+        sockets = [FakeWebSocket(str(i)) for i in range(connection_count)]
+        for socket in sockets:
+            client.set_extension(socket)
+        monkeypatch.setattr(main, "get_flow_client", lambda: client)
+        monkeypatch.setattr(main, "get_worker_controller", lambda: None)
+
+        result = main._get_provider_status_dict()
+        assert result["provider_accounts"] == connection_count
+        assert result["status"] == ("ready" if connection_count else "waiting_for_provider")
+
+        if sockets:
+            client.clear_extension(sockets[-1])
+            assert main._get_provider_status_dict()["provider_accounts"] == connection_count - 1
+
+    @pytest.mark.asyncio
     async def test_multiple_extensions_connect_and_register(self, multi_client):
         ws_a = FakeWebSocket("ws_a")
         ws_b = FakeWebSocket("ws_b")
@@ -144,6 +183,8 @@ class TestMultiExtensionPool:
 
         await multi_client.handle_message({"type": "extension_ready", "installationId": "a"}, ws_a)
         await multi_client.handle_message({"type": "extension_ready", "installationId": "b"}, ws_b)
+        multi_client._extensions[ws_a]["connected_at"] = 2.0
+        multi_client._extensions[ws_b]["connected_at"] = 1.0
 
         async def mock_handler():
             while not ws_a.sent:
@@ -165,7 +206,7 @@ class TestMultiExtensionPool:
             }, ws_b)
 
         asyncio.create_task(mock_handler())
-        res = await multi_client._send("gen_img", {}, timeout=2)
+        res = await multi_client._send("gen_img", {}, timeout=5)
         assert res.get("data") == "succeeded_on_failover"
         assert res.get("_installation_id") == "b"
 

@@ -382,9 +382,37 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
 
     if payload.get("project_id"):
         pid = payload["project_id"]
-    inst_id = req.get("installation_id") or payload.get("installation_id")
+    # request.installation_id is the last actual executor, not a routing lock.
+    inst_id = payload.get("installation_id")
 
     client = ops._client
+
+    # UUID-only inputs must remain on their known owner. Base64 inputs can be
+    # uploaded again on another profile; keep the source bytes across retries.
+    from agent.services.execution_audit import media_owner
+    raw_ids = list(payload.get("reference_media_ids") or []) + list(payload.get("character_media_ids") or [])
+    raw_ids += [payload[key] for key in ("start_media_id", "end_media_id") if payload.get(key)]
+    raw_ids += [img["media_id"] for img in payload.get("input_images", [])
+                if img.get("media_id") and not img.get("image_base64")]
+    for media_id in dict.fromkeys(raw_ids):
+        owner = await media_owner(media_id)
+        if not owner:
+            return {"error": "MEDIA_OWNER_UNKNOWN: upload the original image again before using this UUID"}
+        if (inst_id and inst_id != owner["installation_id"]) or (pid and pid != owner["project_id"]):
+            return {"error": "MEDIA_ACCOUNT_MISMATCH: inputs must share an owner/project; re-upload the original images"}
+        inst_id, pid = owner["installation_id"], owner["project_id"]
+
+    if hasattr(client, "_select_extension"):
+        from agent.config import USE_BATCH_RPC
+        selected = client._select_extension(not USE_BATCH_RPC, preferred_installation=inst_id, preferred_project_id=pid or None)
+        if selected is None:
+            return {"error": "PROFILE_UNAVAILABLE: no eligible profile"}
+        if pid and not inst_id and client._extensions[selected].get("flow_project_id") != pid:
+            return {"error": "PROFILE_UNAVAILABLE: requested project has no available profile"}
+        if not inst_id:
+            inst_id = client._extensions[selected].get("installation_id")
+        if not pid:
+            pid = client._batch_project_id("", preferred_installation=inst_id)
 
     # 1. Image Generation
     if req_type in ("GENERATE_IMAGE", "REGENERATE_IMAGE", "GENERATE_CHARACTER_IMAGE"):
@@ -394,14 +422,14 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
         )
         model = payload.get("model")
         input_images = payload.get("input_images") or []
-        ref_media_ids = list(payload.get("character_media_ids") or [])
+        ref_media_ids = list(payload.get("character_media_ids") or []) + list(payload.get("reference_media_ids") or [])
 
         # Auto-upload Base64 or collect media_ids
         payload_modified = False
         for img in input_images:
             if not isinstance(img, dict):
                 continue
-            if img.get("media_id"):
+            if img.get("media_id") and not img.get("image_base64"):
                 ref_media_ids.append(img["media_id"])
             elif img.get("image_base64"):
                 upload_res = await client.upload_image(
@@ -415,7 +443,8 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
                 mid = upload_res.get("_mediaId") or upload_res.get("data", {}).get("media", {}).get("name")
                 if mid:
                     img["media_id"] = mid
-                    img.pop("image_base64", None)
+                    inst_id = upload_res.get("_installation_id") or inst_id
+                    pid = upload_res.get("_projectId") or pid
                     payload_modified = True
                     ref_media_ids.append(mid)
 
@@ -452,7 +481,7 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
         for img in input_images:
             if not isinstance(img, dict):
                 continue
-            if img.get("media_id"):
+            if img.get("media_id") and not img.get("image_base64"):
                 uploaded_mids.append(img["media_id"])
             elif img.get("image_base64"):
                 upload_res = await client.upload_image(
@@ -466,7 +495,8 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
                 mid = upload_res.get("_mediaId") or upload_res.get("data", {}).get("media", {}).get("name")
                 if mid:
                     img["media_id"] = mid
-                    img.pop("image_base64", None)
+                    inst_id = upload_res.get("_installation_id") or inst_id
+                    pid = upload_res.get("_projectId") or pid
                     payload_modified = True
                     uploaded_mids.append(mid)
 
@@ -475,6 +505,24 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
                 await crud.update_request(rid, payload_json=json.dumps(payload))
             except Exception as e:
                 logger.warning("Failed to cache uploaded video media_id in request %s: %s", rid[:8], e)
+
+        # Preserve explicit roles and include every input in an R2V request.
+        # Keep the historical positional mapping for unlabelled I2V inputs.
+        unlabelled_mids = []
+        for img in input_images:
+            mid = img.get("media_id")
+            if not mid:
+                continue
+            role = img.get("role")
+            if role == "start_frame":
+                start_media_id = start_media_id or mid
+            elif role == "end_frame":
+                end_media_id = end_media_id or mid
+            elif role == "reference" or req_type == "GENERATE_VIDEO_REFS":
+                ref_media_ids.append(mid)
+            else:
+                unlabelled_mids.append(mid)
+        uploaded_mids = unlabelled_mids
 
         if uploaded_mids:
             if not start_media_id:
@@ -486,6 +534,18 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
 
         is_ref_based = req_type == "GENERATE_VIDEO_REFS" or bool(ref_media_ids)
 
+        if video_model == "omni_flash" or payload.get("mode") == "omni":
+            try:
+                from agent.services.client_omni import execute_omni
+                payload["aspect_ratio"] = aspect_ratio
+                return await execute_omni(
+                    req, payload, client, inst_id, pid,
+                    start_media_id=start_media_id, end_media_id=end_media_id,
+                    reference_media_ids=ref_media_ids,
+                )
+            except ImportError:
+                pass
+
         if is_ref_based and ref_media_ids:
             submit_result = await client.generate_video_from_references(
                 reference_media_ids=ref_media_ids,
@@ -494,6 +554,7 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
                 scene_id="",
                 aspect_ratio=aspect_ratio,
                 video_model=video_model,
+                preferred_installation=inst_id,
             )
         else:
             if not start_media_id:
@@ -630,6 +691,17 @@ async def _handle_failure(rid: str, req: dict, result: dict, retry_after: dict =
             return
 
     error_lower = str(error_msg).lower()
+
+    if "media_owner_unknown" in error_lower or "media_account_mismatch" in error_lower:
+        await crud.update_request(rid, status="FAILED", error_message=str(error_msg))
+        await _mark_scene_failed(req)
+        return
+
+    if "profile_unavailable" in error_lower:
+        await crud.update_request(rid, status="PENDING", error_message=str(error_msg))
+        if retry_after is not None:
+            retry_after[rid] = time.time() + 60
+        return
 
     if "unsupported_on_batch_api" in error_lower or "failed: [3]" in error_lower or "invalid_argument" in error_lower or "model_access_denied" in error_lower:
         await crud.update_request(rid, status="FAILED", error_message=str(error_msg))

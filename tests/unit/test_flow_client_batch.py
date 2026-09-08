@@ -19,6 +19,13 @@ IMAGE_URL = f"https://{fb.MEDIA_HOST}/image/{MEDIA}?sig=x"
 VIDEO_URL = f"https://{fb.MEDIA_HOST}/video/{MEDIA}?sig=x"
 
 
+@pytest.fixture(autouse=True)
+async def close_test_connection():
+    yield
+    from agent.db.schema import close_db
+    await close_db()
+
+
 def envelope(rpcid: str, payload) -> str:
     chunk = json.dumps([["wrb.fr", rpcid, json.dumps(payload)]])
     return f")]}}'\n{len(chunk)}\n{chunk}"
@@ -40,7 +47,8 @@ def client(monkeypatch):
     c.responses = {}
     c.calls = []
 
-    async def fake_batch_rpc(rpcid, freq, captcha_action=None, match=None, timeout=300):
+    async def fake_batch_rpc(rpcid, freq, captcha_action=None, match=None, timeout=300,
+                             preferred_installation=None, preferred_project_id=None):
         c.calls.append({"rpcid": rpcid, "freq": freq,
                         "captcha": captcha_action, "match": match})
         canned = c.responses.get(rpcid, {"data": ""})

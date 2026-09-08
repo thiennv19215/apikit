@@ -170,7 +170,7 @@ async def _resolve_jobs_response(job_ids: list[str]) -> JobsResponse:
     )
 
 
-@router.post("/v1/media", response_model=ImageUploadResponse)
+@router.post("/v1/media", response_model=ImageUploadResponse, include_in_schema=False)
 async def upload_image(payload: ImageUploadRequest):
     """Upload Base64 image into Google Flow via connected extension."""
     client = get_flow_client()
@@ -196,6 +196,7 @@ async def upload_image(payload: ImageUploadRequest):
 
     response_data = {
         "media_id": media_id,
+        "installation_id": result.get("_installation_id"),
         "file_name": payload.file_name,
         "media": {
             "name": media_id,
@@ -220,6 +221,7 @@ async def generate_image(payload: ImageGenerationRequest):
 
     payload_dict = {
         "prompt": payload.prompt,
+        "installation_id": payload.installation_id,
         "aspect_ratio": aspect,
         "input_images": [img.model_dump() for img in (payload.input_images or [])],
         "model": payload.model,
@@ -255,6 +257,7 @@ async def generate_video(payload: VideoGenerationRequest):
 
     payload_dict = {
         "prompt": payload.prompt,
+        "installation_id": payload.installation_id,
         "type": payload.type,
         "input_images": [img.model_dump() for img in payload.input_images],
         "aspect_ratio": aspect,
@@ -296,6 +299,14 @@ async def get_job_status(payload: JobStatusRequest):
 async def get_job_by_id(job_id: str):
     """Query job status by job_id (GET)."""
     return await _resolve_jobs_response([job_id])
+
+
+@router.get("/v1/jobs/{job_id}/executions")
+async def get_job_executions(job_id: str):
+    from agent.services.execution_audit import list_calls
+    if not await crud.get_request(job_id):
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"job_id": job_id, "executions": await list_calls(job_id)}
 
 
 @router.get("/v1/jobs/status/{job_id}", response_model=JobsResponse)
