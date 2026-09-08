@@ -536,14 +536,16 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
 
         if video_model == "omni_flash" or payload.get("mode") == "omni":
             try:
-                from agent.services.client_omni import execute_omni
+                import importlib
+                omni_mod = importlib.import_module("agent.services.client_omni")
+                execute_omni = getattr(omni_mod, "execute_omni")
                 payload["aspect_ratio"] = aspect_ratio
                 return await execute_omni(
                     req, payload, client, inst_id, pid,
                     start_media_id=start_media_id, end_media_id=end_media_id,
                     reference_media_ids=ref_media_ids,
                 )
-            except ImportError:
+            except (ImportError, ModuleNotFoundError, AttributeError):
                 pass
 
         if is_ref_based and ref_media_ids:
