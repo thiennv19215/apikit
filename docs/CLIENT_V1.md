@@ -15,7 +15,9 @@ Client gửi ảnh dạng **Base64 (`image_base64`)** trực tiếp trong reques
 | **Visual Styles** | GET | `/v1/materials` | Danh sách phong cách mỹ thuật ảnh (`realistic`, `3d_pixar`, `anime`...) |
 | | GET | `/v1/materials/{id}` | Chi tiết hướng dẫn prompt và phong cách của một style |
 | **Media Gen** | POST | `/v1/images/generations` | 202 Accepted, tạo tác vụ sinh ảnh Base64 (Nano Banana Pro / Banana 2) |
+| | POST | `/v1/images/generations/batch` | 202 Accepted, tạo nhiều tác vụ sinh ảnh Base64 theo lô (batch) |
 | | POST | `/v1/videos/generations` | 202 Accepted, tạo tác vụ sinh video Gemini Omni Flash (First frame, Start+End, R2V) |
+| | POST | `/v1/videos/generations/batch` | 202 Accepted, tạo nhiều tác vụ sinh video Omni Flash theo lô (batch) |
 | **Audio & TTS** | GET | `/v1/audio/voices` | Danh sách mẫu giọng đọc (voice templates) |
 | | POST | `/v1/audio/speech` | Sinh file âm thanh giọng đọc (TTS) từ văn bản kèm Base64 và URL |
 | | POST | `/v1/audio/music` | 202 Accepted, sinh nhạc nền AI qua Suno |
@@ -29,7 +31,11 @@ Client gửi ảnh dạng **Base64 (`image_base64`)** trực tiếp trong reques
 | | GET | `/v1/jobs/{job_id}/executions` | Lịch sử audit thực thi |
 
 > [!IMPORTANT]
-> **Không có endpoint Upload trên Client V1:** Khách hàng không cần gọi bước upload riêng biệt nào. Truyền chuỗi Base64 trực tiếp vào trường `image_base64` của `input_images`.
+> **Quy định điều phối dành cho AI Agent:**
+> - API Client V1 (`/v1/...`) hoạt động theo cơ chế **per-job**: Agent phía client phải tự duyệt vòng lặp `for` từng scene và loop thủ công poll từng `job_id` cho đến khi xong.
+> - **Đối với AI Agent (Antigravity, Claude Code, Cursor...):** Luôn **ƯU TIÊN HÀNG ĐẦU dùng Batch API (`/api/requests/batch`)** để server backend tự động điều phối hàng đợi (throttling 5 request song song, 10s cooldown, failover profile).
+> - **CHỈ sử dụng Client V1 API (loop thủ công)** khi hệ thống Batch của Agent gặp sự cố, kẹt hàng đợi, hoặc cần can thiệp xử lý riêng lẻ từng scene bị lỗi.
+> - **Không có endpoint Upload trên Client V1:** Truyền chuỗi Base64 trực tiếp vào trường `image_base64` của `input_images`.
 
 ---
 
@@ -96,6 +102,69 @@ curl -X POST https://apikit.shopcongngheso5.io.vn/v1/images/generations \
     ]
   }'
 ```
+
+---
+
+### Sinh Nhiều Hình Ảnh Theo Lô (Batch) (`POST /v1/images/generations/batch`)
+
+Endpoint cho phép gửi nhiều tác vụ sinh ảnh cùng lúc. Hỗ trợ 2 định dạng payload:
+1. Object: `{"requests": [ImageGenerationRequest, ...]}`
+2. Array trực tiếp: `[ImageGenerationRequest, ...]`
+
+Server tự động đưa tất cả vào hàng đợi xử lý ngầm (SQLite queue) và trả về `202 Accepted` kèm danh sách toàn bộ các job được tạo.
+
+#### Ví dụ gọi:
+```bash
+curl -X POST https://apikit.shopcongngheso5.io.vn/v1/images/generations/batch \
+  -H "Content-Type: application/json" \
+  -d '{
+    "requests": [
+      {
+        "prompt": "Cyberpunk detective in rainy Tokyo street at night, neon reflections, 8k",
+        "aspect_ratio": "16:9",
+        "model": "pro"
+      },
+      {
+        "prompt": "Portrait of female android with glowing amber eyes in dark laboratory",
+        "aspect_ratio": "9:16",
+        "model": "banana2"
+      }
+    ]
+  }'
+```
+
+Response trả về `JobsResponse` chứa danh sách tất cả các job kèm `job_id`:
+```json
+{
+  "jobs": [
+    {
+      "id": "job_a1b2c3d4e5f60718",
+      "status": "queued",
+      "type": "image",
+      "generation_type": "image",
+      "provider": "google_flow",
+      "media": [],
+      "error": null
+    },
+    {
+      "id": "job_9876543210fedcba",
+      "status": "queued",
+      "type": "image",
+      "generation_type": "image",
+      "provider": "google_flow",
+      "media": [],
+      "error": null
+    }
+  ],
+  "metadata": {
+    "counts": {"queued": 2, "running": 0, "complete": 0, "failed": 0},
+    "done": false,
+    "poll_after_seconds": 10
+  }
+}
+```
+
+Sau khi nhận kết quả, client có thể lấy danh sách `job_id` và dùng `POST /v1/jobs/status` để kiểm tra tiến độ của cả lô.
 
 ---
 
@@ -197,8 +266,82 @@ curl -X POST https://apikit.shopcongngheso5.io.vn/v1/videos/generations \
   }'
 ```
 
-
 ---
+
+### Sinh Nhiều Video Theo Lô (Batch) (`POST /v1/videos/generations/batch`)
+
+Endpoint cho phép gửi nhiều tác vụ sinh video Gemini Omni Flash (hỗ trợ cả First frame, Start+End, R2V) cùng lúc. Hỗ trợ 2 định dạng payload:
+1. Object: `{"requests": [VideoGenerationRequest, ...]}`
+2. Array trực tiếp: `[VideoGenerationRequest, ...]`
+
+Server tự động đưa tất cả vào SQLite queue điều phối tự động và trả về `202 Accepted` kèm danh sách toàn bộ các job được tạo.
+
+#### Ví dụ gọi:
+```bash
+curl -X POST https://apikit.shopcongngheso5.io.vn/v1/videos/generations/batch \
+  -H "Content-Type: application/json" \
+  -d '{
+    "requests": [
+      {
+        "prompt": "0-3s: Cyberpunk hovercar speeds through rainy neon street. 3-6s: Camera follows close behind.",
+        "duration_seconds": 8,
+        "aspect_ratio": "16:9",
+        "model": "omni_flash",
+        "input_images": [
+          {
+            "image_base64": "<BASE64_FRAME_1>",
+            "mime_type": "image/jpeg",
+            "role": "start_frame"
+          }
+        ]
+      },
+      {
+        "prompt": "Camera pushes slowly in on ancient temple hidden in bamboo forest misty morning",
+        "duration_seconds": 4,
+        "aspect_ratio": "9:16",
+        "model": "omni_flash",
+        "input_images": [
+          {
+            "image_base64": "<BASE64_FRAME_2>",
+            "mime_type": "image/jpeg",
+            "role": "start_frame"
+          }
+        ]
+      }
+    ]
+  }'
+```
+
+Response trả về `JobsResponse`:
+```json
+{
+  "jobs": [
+    {
+      "id": "job_1122334455667788",
+      "status": "queued",
+      "type": "video",
+      "generation_type": "image_to_video",
+      "provider": "google_flow",
+      "media": [],
+      "error": null
+    },
+    {
+      "id": "job_9988776655443322",
+      "status": "queued",
+      "type": "video",
+      "generation_type": "image_to_video",
+      "provider": "google_flow",
+      "media": [],
+      "error": null
+    }
+  ],
+  "metadata": {
+    "counts": {"queued": 2, "running": 0, "complete": 0, "failed": 0},
+    "done": false,
+    "poll_after_seconds": 10
+  }
+}
+```
 
 ---
 

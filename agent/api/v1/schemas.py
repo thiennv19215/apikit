@@ -90,6 +90,10 @@ class ImageGenerationRequest(ImageModelContract):
         return self
 
 
+class BatchImageGenerationRequest(BaseModel):
+    requests: list[ImageGenerationRequest] = Field(..., min_length=1, description="List of image generation tasks.")
+
+
 class VideoGenerationRequest(BaseModel):
     prompt: str
     installation_id: str | None = None
@@ -146,6 +150,11 @@ class VideoGenerationRequest(BaseModel):
         if value not in ("image_to_video", "reference_to_video"):
             raise ValueError("Use image_to_video (first or first+last) or reference_to_video")
         return data
+
+
+class BatchVideoGenerationRequest(BaseModel):
+    requests: list[VideoGenerationRequest] = Field(..., min_length=1, description="List of video generation tasks.")
+
 
 
 class JobStatusRequest(BaseModel):

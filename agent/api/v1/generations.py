@@ -9,6 +9,8 @@ from fastapi import APIRouter, HTTPException, Response, status
 from fastapi.responses import JSONResponse
 
 from agent.api.v1.schemas import (
+    BatchImageGenerationRequest,
+    BatchVideoGenerationRequest,
     GeneratedMedia,
     ImageGenerationRequest,
     Job,
@@ -202,6 +204,48 @@ async def generate_image(payload: ImageGenerationRequest):
     return await _resolve_jobs_response([job_id])
 
 
+@router.post("/v1/images/generations/batch", response_model=JobsResponse, status_code=status.HTTP_202_ACCEPTED)
+async def generate_images_batch(payload: BatchImageGenerationRequest | list[ImageGenerationRequest]):
+    """Submit batch image generation tasks atomically. Accepts BatchImageGenerationRequest or list[ImageGenerationRequest]."""
+    items = payload.requests if isinstance(payload, BatchImageGenerationRequest) else payload
+    if not items:
+        raise HTTPException(status_code=422, detail="Requests list cannot be empty")
+
+    job_ids: list[str] = []
+    records = []
+    for item in items:
+        job_id = f"job_{uuid.uuid4().hex[:16]}"
+        aspect = _normalize_image_aspect(item.aspect_ratio)
+        orientation = "HORIZONTAL" if "LANDSCAPE" in aspect else "VERTICAL"
+        payload_dict = {
+            "prompt": item.prompt,
+            "installation_id": item.installation_id,
+            "aspect_ratio": aspect,
+            "input_images": [img.model_dump() for img in (item.input_images or [])],
+            "model": item.model,
+            "count": item.count,
+            "project_id": item.project_id,
+            "reference_media_ids": item.reference_media_ids,
+        }
+        records.append((job_id, "GENERATE_IMAGE", orientation, json.dumps(payload_dict)))
+        job_ids.append(job_id)
+
+    db = await get_db()
+    async with _db_lock:
+        for rec in records:
+            await db.execute(
+                """
+                INSERT INTO request (id, type, orientation, status, payload_json, created_at, updated_at)
+                VALUES (?, ?, ?, 'PENDING', ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+                """,
+                rec,
+            )
+        await db.commit()
+
+    logger.info("v1 Client API queued %d Image Jobs in batch", len(job_ids))
+    return await _resolve_jobs_response(job_ids)
+
+
 @router.post("/v1/videos/generations", response_model=JobsResponse, status_code=status.HTTP_202_ACCEPTED)
 async def generate_video(payload: VideoGenerationRequest):
     """Submit video generation task (accepts Base64 input_images for i2v or r2v)."""
@@ -241,6 +285,56 @@ async def generate_video(payload: VideoGenerationRequest):
 
     logger.info("v1 Client API queued Video Job %s (type=%s, orientation=%s)", job_id, payload.type, orientation)
     return await _resolve_jobs_response([job_id])
+
+
+@router.post("/v1/videos/generations/batch", response_model=JobsResponse, status_code=status.HTTP_202_ACCEPTED)
+async def generate_videos_batch(payload: BatchVideoGenerationRequest | list[VideoGenerationRequest]):
+    """Submit batch video generation tasks atomically. Accepts BatchVideoGenerationRequest or list[VideoGenerationRequest]."""
+    items = payload.requests if isinstance(payload, BatchVideoGenerationRequest) else payload
+    if not items:
+        raise HTTPException(status_code=422, detail="Requests list cannot be empty")
+
+    job_ids: list[str] = []
+    records = []
+    for item in items:
+        job_id = f"job_{uuid.uuid4().hex[:16]}"
+        aspect = _normalize_video_aspect(item.aspect_ratio)
+        orientation = "HORIZONTAL" if "LANDSCAPE" in aspect else "VERTICAL"
+        is_ref_based = item.type in ("reference_to_video", "ingredients", "references", "omni", "r2v")
+        req_type = "GENERATE_VIDEO_REFS" if is_ref_based else "GENERATE_VIDEO"
+
+        payload_dict = {
+            "prompt": item.prompt,
+            "installation_id": item.installation_id,
+            "type": item.type,
+            "input_images": [img.model_dump() for img in item.input_images],
+            "aspect_ratio": aspect,
+            "duration_seconds": item.duration_seconds,
+            "project_id": item.project_id,
+            "start_media_id": item.start_media_id,
+            "end_media_id": item.end_media_id,
+            "reference_media_ids": item.reference_media_ids,
+            "model": item.model or item.mode or item.model_family or item.quality or "omni_flash",
+            "quality": item.quality,
+            "dialogue": item.dialogue,
+        }
+        records.append((job_id, req_type, orientation, json.dumps(payload_dict)))
+        job_ids.append(job_id)
+
+    db = await get_db()
+    async with _db_lock:
+        for rec in records:
+            await db.execute(
+                """
+                INSERT INTO request (id, type, orientation, status, payload_json, created_at, updated_at)
+                VALUES (?, ?, ?, 'PENDING', ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+                """,
+                rec,
+            )
+        await db.commit()
+
+    logger.info("v1 Client API queued %d Video Jobs in batch", len(job_ids))
+    return await _resolve_jobs_response(job_ids)
 
 
 @router.post("/v1/jobs/status", response_model=JobsResponse)

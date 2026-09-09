@@ -677,10 +677,62 @@ class FlowKitClient:
             time.sleep(interval)
         raise TimeoutError(f"Job {job_id} timed out after {timeout} seconds")
 
+    def v1_get_jobs(self, job_ids: List[str]) -> Dict[str, Any]:
+        """Check status of multiple Client V1 generation jobs in batch."""
+        return self._request("POST", "/v1/jobs/status", json_data={"job_ids": job_ids})
+
+    def v1_poll_jobs(
+        self,
+        job_ids: List[str],
+        interval: float = 10.0,
+        timeout: float = 900.0,
+        on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> Dict[str, Any]:
+        """Poll POST /v1/jobs/status until all jobs in batch are complete or failed."""
+        start = time.time()
+        while time.time() - start < timeout:
+            res = self.v1_get_jobs(job_ids)
+            if on_progress:
+                on_progress(res)
+            metadata = res.get("metadata", {})
+            if metadata.get("done", False):
+                return res
+            time.sleep(interval)
+        raise TimeoutError(f"Batch jobs timed out after {timeout} seconds")
+
     # Primary aliases
     generate_image = v1_generate_image
     generate_video = v1_generate_video
     poll_job = v1_poll_job
+    get_jobs = v1_get_jobs
+    poll_jobs = v1_poll_jobs
+
+    def v1_generate_images_batch(
+        self,
+        requests: Union[List[Dict[str, Any]], Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Submit batch image generation tasks via Client V1 API.
+        
+        Args:
+            requests: List of image generation request dicts, or {"requests": [...]}
+        """
+        payload = {"requests": requests} if isinstance(requests, list) else requests
+        return self._request("POST", "/v1/images/generations/batch", json_data=payload)
+
+    def v1_generate_videos_batch(
+        self,
+        requests: Union[List[Dict[str, Any]], Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Submit batch video generation tasks via Client V1 API.
+        
+        Args:
+            requests: List of video generation request dicts, or {"requests": [...]}
+        """
+        payload = {"requests": requests} if isinstance(requests, list) else requests
+        return self._request("POST", "/v1/videos/generations/batch", json_data=payload)
+
+    generate_images_batch = v1_generate_images_batch
+    generate_videos_batch = v1_generate_videos_batch
 
     def v1_list_materials(self) -> List[Dict[str, Any]]:
         """List all visual styles / materials available in FlowKit."""

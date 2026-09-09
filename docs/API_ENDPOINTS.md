@@ -29,6 +29,13 @@ Tài liệu tổng hợp toàn bộ các endpoint của FlowKit Server, phân đ
 ## NHÓM 1: CLIENT BACKEND API (/v1 & Health)
 *Được thiết kế chuẩn 1:1 theo hợp đồng của `FlowProviderAPI` và MCP tool. Không cần truyền `project_id`, gửi trực tiếp ảnh Base64, tự động cân bằng tải và chọn profile tài khoản. Xem tài liệu hướng dẫn tích hợp chi tiết tại [CLIENT_V1.md](CLIENT_V1.md), cơ chế audit log tại [EXECUTION_LOGS.md](EXECUTION_LOGS.md), và bảo trì hệ thống tại [CLIENT_MAINTENANCE_INTERNAL.md](CLIENT_MAINTENANCE_INTERNAL.md).*
 
+> [!NOTE]
+> **Chính sách điều phối dành cho AI Agent:**
+> - Các API trong Nhóm 1 (`/v1/...`) hoạt động theo từng job đơn lẻ, Agent phía client phải **tự loop thủ công** từng scene.
+> - **Đối với AI Agent (Antigravity, Claude, Cursor...):** Luôn **ƯU TIÊN HÀNG ĐẦU dùng Batch API trong Nhóm 2 (`/api/requests/batch`)** để server backend tự điều phối hàng đợi (tự throttle, cooldown, tự failover quota).
+> - **CHỈ sử dụng Nhóm 1 (`/v1/...`)** như phương án dự phòng (fallback) khi hệ thống Batch của Agent gặp lỗi hoặc tắc nghẽn.
+
+
 ### 1.1. Kiểm tra Sức khỏe & Readiness Probe
 Dùng cho load balancer, Docker, Kubernetes hoặc client backend kiểm tra trước khi dispatch tác vụ.
 
@@ -176,6 +183,14 @@ Hệ thống sử dụng **Gemini Omni Flash** độc quyền trên Google Flow 
   "status": "queued"
 }
 ```
+
+#### 1.2.3. Sinh Nhiều Ảnh Theo Lô: `POST /v1/images/generations/batch`
+Gửi nhiều yêu cầu sinh ảnh trong một HTTP call (nhận `{"requests": [ImageGenerationRequest, ...]}` hoặc mảng `[...]`).
+Trả về HTTP **202 Accepted** với `JobsResponse` chứa danh sách toàn bộ các job được đưa vào hàng đợi SQLite queue.
+
+#### 1.2.4. Sinh Nhiều Video Theo Lô: `POST /v1/videos/generations/batch`
+Gửi nhiều yêu cầu sinh video Omni Flash trong một HTTP call (nhận `{"requests": [VideoGenerationRequest, ...]}` hoặc mảng `[...]`).
+Trả về HTTP **202 Accepted** với `JobsResponse` chứa danh sách toàn bộ các job được đưa vào hàng đợi SQLite queue.
 
 ---
 

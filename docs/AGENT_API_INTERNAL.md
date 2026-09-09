@@ -122,9 +122,9 @@ Mỗi dự án chứa một hoặc nhiều video (tập phim), mỗi video chứ
 
 ---
 
-## 5. Hàng đợi & Batch Requests Pipeline
+## 5. Hàng đợi & Batch Requests Pipeline (Cơ chế Tự Điều Phối Ưu Tiên)
 
-Agent nộp các batch request đồng loạt qua API này; hệ thống tự động throttle (tối đa 5 concurrent, cooldown 10s giữa các đợt dispatch).
+Đây là **cơ chế ưu tiên hàng đầu dành cho AI Agent**: Agent nộp toàn bộ batch request một lần; worker backend tự động điều phối hàng đợi (tự động throttle tối đa 5 concurrent, cooldown 10s giữa các đợt dispatch, tự động failover quota đa tài khoản). Agent **không cần viết vòng lặp loop thủ công từng scene** (chỉ loop thủ công qua Client V1 `/v1/...` khi hệ thống Batch gặp sự cố).
 
 | Method | Endpoint | Mục đích |
 |---|---|---|
@@ -132,6 +132,7 @@ Agent nộp các batch request đồng loạt qua API này; hệ thống tự đ
 | `GET` | `/api/requests/batch-status` | Polling trạng thái tiến độ theo `project_id` hoặc `video_id` |
 | `GET` | `/api/requests` | Xem toàn bộ hàng đợi |
 | `GET` | `/api/requests/{id}` | Chi tiết một request |
+
 
 **Polling Batch Status:**
 ```bash

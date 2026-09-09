@@ -377,3 +377,103 @@ async def test_multi_job_status():
         assert batch_data["jobs"][0]["status"] == "queued"
         assert batch_data["jobs"][1]["status"] == "failed"
         assert batch_data["jobs"][1]["error"]["code"] == "JOB_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_v1_images_generations_batch():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        # Submit batch with {"requests": [...]}
+        resp = await ac.post("/v1/images/generations/batch", json={
+            "requests": [
+                {"prompt": "Batch image prompt 1", "aspect_ratio": "16:9"},
+                {"prompt": "Batch image prompt 2", "aspect_ratio": "9:16"},
+            ]
+        })
+        assert resp.status_code == 202
+        data = resp.json()
+        assert "jobs" in data
+        assert len(data["jobs"]) == 2
+        j1 = data["jobs"][0]
+        j2 = data["jobs"][1]
+        assert j1["type"] == "image"
+        assert j1["status"] == "queued"
+        assert j2["type"] == "image"
+        assert j2["status"] == "queued"
+
+        # Verify polling with /v1/jobs/status works
+        poll_resp = await ac.post("/v1/jobs/status", json={"job_ids": [j1["id"], j2["id"]]})
+        assert poll_resp.status_code == 200
+        poll_data = poll_resp.json()
+        assert len(poll_data["jobs"]) == 2
+        assert poll_data["jobs"][0]["id"] == j1["id"]
+        assert poll_data["jobs"][1]["id"] == j2["id"]
+
+
+@pytest.mark.asyncio
+async def test_v1_videos_generations_batch():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        # Submit batch directly as list [...]
+        resp = await ac.post("/v1/videos/generations/batch", json=[
+            {"prompt": "Batch video prompt 1", "duration_seconds": 8, "aspect_ratio": "16:9"},
+            {"prompt": "Batch video prompt 2", "duration_seconds": 4, "aspect_ratio": "9:16"},
+        ])
+        assert resp.status_code == 202
+        data = resp.json()
+        assert "jobs" in data
+        assert len(data["jobs"]) == 2
+        j1 = data["jobs"][0]
+        j2 = data["jobs"][1]
+        assert j1["type"] == "video"
+        assert j1["status"] == "queued"
+        assert j2["type"] == "video"
+        assert j2["status"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_v1_batch_empty_validation():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        # Empty object requests
+        resp_obj = await ac.post("/v1/images/generations/batch", json={"requests": []})
+        assert resp_obj.status_code == 422
+
+        # Empty list
+        resp_list = await ac.post("/v1/videos/generations/batch", json=[])
+        assert resp_list.status_code == 422
+
+
+def test_flowkit_client_batch_methods(monkeypatch):
+    from flowkit_client import FlowKitClient
+    client = FlowKitClient(base_url="http://test")
+    recorded = []
+
+    def fake_request(method, endpoint, **kwargs):
+        recorded.append((method, endpoint, kwargs))
+        if endpoint == "/v1/jobs/status":
+            return {"jobs": [{"id": jid, "status": "complete"} for jid in kwargs["json_data"]["job_ids"]], "metadata": {"done": True}}
+        return {"jobs": [{"id": "job_1", "status": "queued"}], "metadata": {"done": False}}
+
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    # Test batch image generation
+    res_img = client.v1_generate_images_batch([{"prompt": "img 1"}, {"prompt": "img 2"}])
+    assert recorded[-1][0] == "POST"
+    assert recorded[-1][1] == "/v1/images/generations/batch"
+    assert "requests" in recorded[-1][2]["json_data"]
+
+    # Test batch video generation
+    res_vid = client.v1_generate_videos_batch([{"prompt": "vid 1"}])
+    assert recorded[-1][0] == "POST"
+    assert recorded[-1][1] == "/v1/videos/generations/batch"
+
+    # Test get_jobs and poll_jobs
+    jobs_res = client.v1_get_jobs(["job_1", "job_2"])
+    assert recorded[-1][1] == "/v1/jobs/status"
+    assert recorded[-1][2]["json_data"] == {"job_ids": ["job_1", "job_2"]}
+
+    poll_res = client.v1_poll_jobs(["job_1", "job_2"], interval=0.01)
+    assert poll_res["metadata"]["done"] is True
+
+

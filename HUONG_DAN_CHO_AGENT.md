@@ -296,8 +296,10 @@ curl -X POST http://127.0.0.1:8100/api/flow/accounts/reset-all-quota
 12. **Cập nhật cảnh bằng PATCH:** Sử dụng `PATCH /api/scenes/{id}` để cập nhật prompt, video_prompt, narrator_text. Không xóa đi tạo lại.
 13. **Tránh trigger bộ lọc Google Safety đối với nhân vật nổi tiếng:** Khi làm phim tài liệu về nhân vật có thật, đặt tên nhân vật dạng bí danh tiếng Anh (ví dụ: `The Commander`, `The Diplomat`), không dùng tên thật hoặc chức danh chính trị nhạy cảm trong prompt.
 14. **Media ID gắn liền với tài khoản (Account-scoped) & Cơ chế Multi-Account Quota Failover:** Tài nguyên Google Flow không thể chia sẻ giữa các tài khoản khác nhau. Khi một tài khoản chạm hạn mức quota (`public_error_user_quota_reached` hoặc `RESOURCE_EXHAUSTED`), FlowKit tự động đánh dấu tài khoản đó vào chế độ chờ 12 giờ, đồng thời tự động điều hướng sang profile khả dụng tiếp theo có credit và tự động tải lại (re-upload) ảnh tham chiếu nếu cần.
+15. **Ưu tiên Batch API (Server tự điều phối) & Chỉ dùng V1 (Loop thủ công) khi lỗi:** Dù cùng chung endpoint server, Agent luôn ưu tiên vận hành qua **Batch API (`/api/requests/batch`)** và các hàm `client.batch_generate_*` để server worker tự động điều phối hàng đợi (throttle tối đa 5 request, 10s cooldown, failover quota giữa các profile tự động). **CHỈ chuyển sang V1 API (`/v1/...`) với cơ chế loop thủ công từng job** khi hệ thống Batch của Agent gặp lỗi hoặc bị tắc nghẽn.
 
 ---
+
 
 ## 6. ĐỒNG BỘ CẤU HÌNH BẰNG SETUP.PY
 
