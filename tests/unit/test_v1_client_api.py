@@ -1,6 +1,7 @@
 """Unit tests for FlowKit Client API v1 (/v1/...)."""
 import asyncio
 import json
+from unittest.mock import AsyncMock
 import pytest
 from httpx import AsyncClient, ASGITransport
 
@@ -153,6 +154,75 @@ async def test_video_generation_endpoint_and_status():
         stat_resp = await ac.get(f"/v1/jobs/{job_id}")
         assert stat_resp.status_code == 200
         assert stat_resp.json()["status"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_v1_omni_r2v_base64_uses_selected_profile_and_persists_workflow(monkeypatch):
+    """Regression: an installation-scoped R2V job must not use `client` before assignment."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        submitted = await ac.post("/v1/videos/generations", json={
+            "prompt": "A paper boat crosses a calm puddle",
+            "generation_type": "reference_to_video",
+            "model": "omni_flash",
+            "installation_id": "install-a",
+            "input_images": [{"role": "reference", "image_base64": "aGVsbG8=", "mime_type": "image/png"}],
+        })
+        assert submitted.status_code == 202
+        job_id = submitted.json()["job_id"]
+
+        class SelectedProfileClient:
+            _extensions = {"profile-a": {"installation_id": "install-a", "flow_project_id": "11111111-1111-4111-8111-111111111111"}}
+
+            def is_installation_exhausted(self, installation_id):
+                return False
+
+            def _select_extension(self, require_token, preferred_installation=None, preferred_project_id=None):
+                assert preferred_installation == "install-a"
+                return "profile-a"
+
+            def _batch_project_id(self, project_id, preferred_installation=None):
+                assert preferred_installation == "install-a"
+                return "11111111-1111-4111-8111-111111111111"
+
+        client = SelectedProfileClient()
+        client.upload_image = AsyncMock(return_value={
+            "_mediaId": "22222222-2222-4222-8222-222222222222",
+            "_installation_id": "install-a",
+            "_projectId": "11111111-1111-4111-8111-111111111111",
+        })
+        client.generate_video_from_references = AsyncMock(return_value={
+            "status": 200,
+            "data": {"operations": [{"operation": {"name": "workflows/omni-r2v-1"}, "status": "MEDIA_GENERATION_STATUS_SUCCESSFUL"}]},
+            "_installation_id": "install-a",
+        })
+        client.generate_video = AsyncMock()
+
+        req = await crud.get_request(job_id)
+        result = await _dispatch_client_v1(req, "HORIZONTAL", type("Ops", (), {"_client": client})())
+
+        assert result["data"]["operations"][0]["operation"]["name"] == "workflows/omni-r2v-1"
+        assert client.upload_image.await_args.kwargs["preferred_installation"] == "install-a"
+        assert client.generate_video_from_references.await_args.kwargs == {
+            "reference_media_ids": ["22222222-2222-4222-8222-222222222222"],
+            "prompt": "A paper boat crosses a calm puddle",
+            "project_id": "11111111-1111-4111-8111-111111111111",
+            "scene_id": "",
+            "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
+            "video_model": "abra_r2v_8s",
+            "preferred_installation": "install-a",
+        }
+        stored = await crud.get_request(job_id)
+        assert stored["request_id"] == "workflows/omni-r2v-1"
+        assert json.loads(stored["payload_json"])["input_images"][0]["media_id"] == "22222222-2222-4222-8222-222222222222"
+
+        # Client polling reads the same job record and exposes completed media.
+        await crud.update_request(job_id, status="COMPLETED", media_id="33333333-3333-4333-8333-333333333333", output_url="https://example.test/video.mp4")
+        polled = await ac.post("/v1/jobs/status", json={"job_id": job_id})
+        assert polled.status_code == 200
+        assert polled.json()["status"] == "complete"
+        assert polled.json()["media"][0]["type"] == "video"
+        assert polled.json()["media"][0]["url"] == "https://example.test/video.mp4"
 
 
 @pytest.mark.asyncio

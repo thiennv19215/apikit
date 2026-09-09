@@ -412,6 +412,14 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
     req_type = req["type"]
     rid = req["id"]
     pid = req.get("project_id") or ""
+    # V1 jobs are decoupled from a scene, so there is no earlier dispatch path
+    # that necessarily touched the Flow client.  Resolve it before examining
+    # the requested installation: otherwise a request carrying an
+    # installation_id raises UnboundLocalError before it can upload Base64
+    # inputs or submit the workflow.
+    client = getattr(ops, "_client", None)
+    if client is None:
+        return {"error": "PROFILE_UNAVAILABLE: Flow client is not configured"}
 
     try:
         payload = json.loads(req.get("payload_json") or "{}")
@@ -425,8 +433,6 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
     if inst_id and hasattr(client, "is_installation_exhausted") and client.is_installation_exhausted(inst_id):
         inst_id = None
         pid = None
-
-    client = ops._client
 
     # UUID-only inputs must remain on their known owner. Base64 inputs can be
     # uploaded again on another profile; keep the source bytes across retries.
@@ -448,12 +454,21 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
         selected = client._select_extension(not USE_BATCH_RPC, preferred_installation=inst_id, preferred_project_id=pid or None)
         if selected is None:
             return {"error": "PROFILE_UNAVAILABLE: no eligible profile"}
-        if pid and not inst_id and client._extensions[selected].get("flow_project_id") != pid:
+        selected_profile = client._extensions.get(selected, {})
+        selected_inst_id = selected_profile.get("installation_id")
+        if inst_id and selected_inst_id != inst_id:
+            return {"error": "PROFILE_UNAVAILABLE: requested installation is not an eligible authenticated profile"}
+        if pid and not inst_id and selected_profile.get("flow_project_id") != pid:
             return {"error": "PROFILE_UNAVAILABLE: requested project has no available profile"}
         if not inst_id:
-            inst_id = client._extensions[selected].get("installation_id")
+            inst_id = selected_inst_id
+        if not inst_id:
+            return {"error": "PROFILE_UNAVAILABLE: selected profile has no installation_id; reconnect the Flow extension"}
         if not pid:
-            pid = client._batch_project_id("", preferred_installation=inst_id)
+            try:
+                pid = client._batch_project_id("", preferred_installation=inst_id)
+            except Exception as e:
+                return {"error": f"PROFILE_UNAVAILABLE: selected profile has no usable Flow project: {e}"}
 
     # 1. Image Generation
     if req_type in ("GENERATE_IMAGE", "REGENERATE_IMAGE", "GENERATE_CHARACTER_IMAGE"):
