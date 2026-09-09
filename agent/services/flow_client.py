@@ -34,6 +34,30 @@ from agent.services.headers import random_headers
 logger = logging.getLogger(__name__)
 
 
+def is_quota_error(error_msg: object) -> bool:
+    """Return True if error indicates Google Flow user quota or credit exhaustion."""
+    if not error_msg:
+        return False
+    msg = str(error_msg).lower()
+    quota_markers = (
+        "public_error_per_model_daily_quota_reached",
+        "public_error_user_quota_reached",
+        "user_quota_reached",
+        "per_model_daily_quota_reached",
+        "quota_reached",
+        "quota_exceeded",
+        "quotaexceeded",
+        "resource_exhausted",
+        "daily_quota",
+        "credits exhausted",
+    )
+    if any(m in msg for m in quota_markers):
+        return True
+    if "quota" in msg and any(w in msg for w in ("exceed", "reach", "limit", "exhaust", "zero", "0", "denied")):
+        return True
+    return False
+
+
 class FlowClient:
     """Sends commands to Chrome extension via WebSocket."""
 
@@ -64,6 +88,8 @@ class FlowClient:
             "flow_key": None,
             "token_captured_at": None,
             "unavailable_until": 0,
+            "quota_exhausted": False,
+            "quota_exhausted_at": None,
             "installation_id": None,
             "profile_name": None,
             "account_email": None,
@@ -131,6 +157,44 @@ class FlowClient:
                 return ws
         return None
 
+    def mark_quota_exhausted(self, installation_id: str | None = None, ws=None):
+        """Mark an extension installation as quota-exhausted for 12 hours."""
+        target_ws = ws or (self.get_extension_by_installation(installation_id) if installation_id else self._extension_ws)
+        if target_ws and target_ws in self._extensions:
+            sess = self._extensions[target_ws]
+            sess["quota_exhausted"] = True
+            sess["quota_exhausted_at"] = time.time()
+            sess["unavailable_until"] = time.time() + 43200  # 12 hours
+            logger.warning(
+                "Extension profile marked QUOTA EXHAUSTED: installation=%s profile=%s (unavailable for 12h)",
+                sess.get("installation_id"),
+                sess.get("profile_name"),
+            )
+
+    def reset_quota_status(self, installation_id: str | None = None) -> int:
+        """Reset quota exhausted status for one or all extensions."""
+        count = 0
+        for ws, sess in self._extensions.items():
+            if installation_id is None or sess.get("installation_id") == installation_id:
+                sess["quota_exhausted"] = False
+                sess["quota_exhausted_at"] = None
+                sess["unavailable_until"] = 0
+                count += 1
+                logger.info("Reset quota status for installation=%s", sess.get("installation_id"))
+        return count
+
+    def is_installation_exhausted(self, installation_id: str | None) -> bool:
+        """Check if an installation ID is currently marked as quota-exhausted or unavailable."""
+        if not installation_id:
+            return False
+        for ws, sess in self._extensions.items():
+            if sess.get("installation_id") == installation_id:
+                if sess.get("quota_exhausted"):
+                    return True
+                if sess.get("unavailable_until", 0) > time.time():
+                    return True
+        return False
+
     def list_extensions(self) -> list[dict]:
         """Return list of connected extensions and their stats."""
         now = time.time()
@@ -142,7 +206,10 @@ class FlowClient:
                 "account_email": session.get("account_email"),
                 "flow_project_id": session.get("flow_project_id"),
                 "in_flight": session.get("in_flight", 0),
-                "available": session.get("unavailable_until", 0) <= now,
+                "available": session.get("unavailable_until", 0) <= now and not session.get("quota_exhausted", False),
+                "quota_exhausted": bool(session.get("quota_exhausted", False)),
+                "quota_exhausted_at": session.get("quota_exhausted_at"),
+                "unavailable_until": session.get("unavailable_until", 0),
                 "has_flow_tab": session.get("has_flow_tab"),
                 "connected_at": session.get("connected_at"),
                 "credits": session.get("credits"),
@@ -167,7 +234,10 @@ class FlowClient:
                 if require_token
                 else session.get("connected_at")
             )
-            available = session.get("unavailable_until", 0) <= now
+            available = (
+                session.get("unavailable_until", 0) <= now
+                and not session.get("quota_exhausted", False)
+            )
             if not available:
                 continue
             matches_project = bool(
@@ -230,6 +300,8 @@ class FlowClient:
     def _should_failover(result: dict) -> bool:
         """Return true for profile-local failures that another tab can solve."""
         message = str(result.get("error") or result.get("data") or "").lower()
+        if is_quota_error(message):
+            return True
         return any(marker in message for marker in (
             "no_flow_key",
             "no_flow_tab",
@@ -594,9 +666,13 @@ class FlowClient:
                 logger.exception("Could not finalize execution audit %s", call_id)
             if self._should_failover(last_result):
                 if extension_ws in self._extensions:
-                    self._extensions[extension_ws]["unavailable_until"] = (
-                        time.time() + 60
-                    )
+                    err_msg = last_result.get("error") or last_result.get("data")
+                    if is_quota_error(err_msg):
+                        self.mark_quota_exhausted(ws=extension_ws)
+                    else:
+                        self._extensions[extension_ws]["unavailable_until"] = (
+                            time.time() + 60
+                        )
             if self._should_failover(last_result) and has_alternative:
                 logger.warning(
                     "Extension profile unavailable for %s; retrying through "
@@ -699,14 +775,17 @@ class FlowClient:
         4. Project from agent's active_project state
         5. Global FLOW_PROJECT_ID environment variable (optional override)
         """
-        if project_id and self._UUID_RE.match(str(project_id)):
-            return str(project_id)
+        # 1. Flow project associated with target/preferred extension installation
         if preferred_installation:
             target_ws = self.get_extension_by_installation(preferred_installation)
             if target_ws and target_ws in self._extensions:
                 sess_pid = self._extensions[target_ws].get("flow_project_id")
                 if sess_pid and self._UUID_RE.match(str(sess_pid)):
                     return str(sess_pid)
+
+        # 2. Explicit valid UUID passed in request
+        if project_id and self._UUID_RE.match(str(project_id)):
+            return str(project_id)
 
         # Give extension_ready a brief moment if extension has just reconnected
         for _ in range(6):

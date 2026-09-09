@@ -633,6 +633,37 @@ class FlowKitClient:
         """Check status of a Client V1 generation job."""
         return self._request("GET", f"/v1/jobs/{job_id}")
 
+    def v1_poll_job(
+        self,
+        job_id: str,
+        interval: float = 10.0,
+        timeout: float = 900.0,
+        on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> Dict[str, Any]:
+        """Poll GET /v1/jobs/{job_id} until status is complete or failed."""
+        start = time.time()
+        while time.time() - start < timeout:
+            res = self.v1_get_job(job_id)
+            jobs = res.get("jobs", [])
+            if not jobs:
+                raise FlowKitError(f"No job details returned for job_id {job_id}: {res}")
+            job = jobs[0]
+            if on_progress:
+                on_progress(job)
+            status = job.get("status")
+            if status == "complete":
+                return job
+            elif status == "failed":
+                err = job.get("error") or "Unknown error"
+                raise FlowKitError(f"Job {job_id} failed: {err}")
+            time.sleep(interval)
+        raise TimeoutError(f"Job {job_id} timed out after {timeout} seconds")
+
+    # Primary aliases
+    generate_image = v1_generate_image
+    generate_video = v1_generate_video
+    poll_job = v1_poll_job
+
     def v1_list_materials(self) -> List[Dict[str, Any]]:
         """List all visual styles / materials available in FlowKit."""
         return self._request("GET", "/v1/materials")

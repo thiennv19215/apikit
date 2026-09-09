@@ -117,6 +117,39 @@ async def extension_status():
     }
 
 
+@router.get("/accounts")
+async def list_accounts():
+    """List all connected browser profiles/extensions with quota availability."""
+    client = get_flow_client()
+    extensions = client.list_extensions()
+    available_count = sum(1 for e in extensions if e.get("available"))
+    exhausted_count = sum(1 for e in extensions if e.get("quota_exhausted"))
+    return {
+        "total": len(extensions),
+        "available": available_count,
+        "quota_exhausted": exhausted_count,
+        "accounts": extensions,
+    }
+
+
+@router.post("/accounts/{installation_id}/reset-quota")
+async def reset_account_quota(installation_id: str):
+    """Reset quota status for a specific browser profile."""
+    client = get_flow_client()
+    reset_count = client.reset_quota_status(installation_id)
+    if not reset_count:
+        raise HTTPException(404, f"No connected profile found with installation ID {installation_id}")
+    return {"status": "ok", "message": f"Reset quota status for installation {installation_id}"}
+
+
+@router.post("/accounts/reset-all-quota")
+async def reset_all_accounts_quota():
+    """Reset quota status for all connected browser profiles."""
+    client = get_flow_client()
+    reset_count = client.reset_quota_status(None)
+    return {"status": "ok", "message": f"Reset quota status for {reset_count} profiles"}
+
+
 @router.get("/credits")
 async def get_credits():
     """Get user credits from Google Flow."""

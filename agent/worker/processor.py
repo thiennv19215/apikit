@@ -422,6 +422,9 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
         pid = payload["project_id"]
     # request.installation_id is the last actual executor, not a routing lock.
     inst_id = payload.get("installation_id")
+    if inst_id and hasattr(client, "is_installation_exhausted") and client.is_installation_exhausted(inst_id):
+        inst_id = None
+        pid = None
 
     client = ops._client
 
@@ -659,7 +662,7 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
     return {"error": f"Unsupported client v1 request type: {req_type}"}
 
 
-async def _reupload_media(url: str, project_id: str) -> str | None:
+async def _reupload_media(url: str, project_id: str, preferred_installation: str | None = None) -> str | None:
     """Download image from URL and re-upload to get a fresh media_id."""
     try:
         async with aiohttp.ClientSession() as session:
@@ -677,10 +680,14 @@ async def _reupload_media(url: str, project_id: str) -> str | None:
         mime = content_type.split(";")[0].strip()
 
         client = get_flow_client()
-        result = await client.upload_image(image_b64, mime_type=mime, project_id=project_id)
+        result = await client.upload_image(
+            image_b64, mime_type=mime, project_id=project_id,
+            preferred_installation=preferred_installation,
+        )
         new_mid = result.get("_mediaId")
         if new_mid:
-            logger.info("Re-upload OK: fresh media_id=%s", new_mid[:20])
+            logger.info("Re-upload OK: fresh media_id=%s (inst=%s)",
+                        new_mid[:20], result.get("_installation_id") or "?")
             return new_mid
         logger.warning("Re-upload: no media_id in response: %s", str(result)[:200])
     except Exception as e:
@@ -688,8 +695,8 @@ async def _reupload_media(url: str, project_id: str) -> str | None:
     return None
 
 
-async def _recover_entity_not_found(req: dict) -> bool:
-    """When Google returns 'entity not found', re-upload the image to get a fresh media_id."""
+async def _recover_entity_not_found(req: dict, preferred_installation: str | None = None) -> bool:
+    """When Google returns 'entity not found' or quota fails over, re-upload to get fresh media_id."""
     req_type = req.get("type", "")
     pid = req.get("project_id", "")
     orientation = await _resolve_orientation(req)
@@ -703,11 +710,35 @@ async def _recover_entity_not_found(req: dict) -> bool:
         url = scene.get(f"{prefix}_image_url")
         if not url:
             return False
-        new_mid = await _reupload_media(url, pid)
+        new_mid = await _reupload_media(url, pid, preferred_installation=preferred_installation)
         if new_mid:
             await crud.update_scene(scene["id"], **{f"{prefix}_image_media_id": new_mid})
             logger.info("Recovered scene %s: new %s_image_media_id=%s", scene["id"][:12], prefix, new_mid[:12])
             return True
+
+    # Scene image generation with character refs: re-upload character refs if needed
+    if req_type in ("GENERATE_IMAGE", "REGENERATE_IMAGE"):
+        scene = await crud.get_scene(req.get("scene_id"))
+        if scene and scene.get("character_names") and pid:
+            char_names_raw = scene.get("character_names")
+            if isinstance(char_names_raw, str):
+                try:
+                    char_names_raw = json.loads(char_names_raw)
+                except Exception:
+                    char_names_raw = []
+            if isinstance(char_names_raw, list):
+                project_chars = await crud.get_project_characters(pid)
+                char_names_set = set(char_names_raw)
+                recovered_any = False
+                for c in project_chars:
+                    if (c.get("slug") in char_names_set or c.get("name") in char_names_set) and c.get("reference_image_url"):
+                        new_mid = await _reupload_media(c["reference_image_url"], pid, preferred_installation=preferred_installation)
+                        if new_mid:
+                            await crud.update_character(c["id"], media_id=new_mid)
+                            logger.info("Recovered character ref %s: new media_id=%s", c["name"], new_mid[:12])
+                            recovered_any = True
+                if recovered_any:
+                    return True
 
     # Character-based requests: re-upload ref image
     if req_type in ("EDIT_CHARACTER_IMAGE",):
@@ -717,7 +748,7 @@ async def _recover_entity_not_found(req: dict) -> bool:
         url = char.get("reference_image_url")
         if not url:
             return False
-        new_mid = await _reupload_media(url, pid)
+        new_mid = await _reupload_media(url, pid, preferred_installation=preferred_installation)
         if new_mid:
             await crud.update_character(char["id"], media_id=new_mid)
             logger.info("Recovered character %s: new media_id=%s", char["id"][:12], new_mid[:12])
@@ -758,6 +789,46 @@ async def _handle_failure(rid: str, req: dict, result: dict, retry_after: dict =
             return
 
     error_lower = str(error_msg).lower()
+
+    from agent.services.flow_client import is_quota_error
+    if is_quota_error(error_msg):
+        client = get_flow_client()
+        failed_inst = (
+            result.get("_installation_id")
+            or req.get("installation_id")
+            or (client._extensions.get(client._extension_ws, {}).get("installation_id") if client._extension_ws else None)
+        )
+        if failed_inst:
+            client.mark_quota_exhausted(failed_inst)
+
+        retry = req.get("retry_count", 0) + 1
+        if retry < MAX_RETRIES:
+            logger.warning(
+                "Request %s: Account %s quota exhausted. Retrying with alternative profile (retry %d/%d).",
+                rid[:8], failed_inst or "unknown", retry, MAX_RETRIES,
+            )
+            # Pre-recover / re-upload media if this request is scene or character based
+            if req.get("scene_id") or req.get("character_id"):
+                try:
+                    await _recover_entity_not_found(req)
+                except Exception as e:
+                    logger.warning("Could not pre-recover media during quota failover: %s", e)
+
+            # Reset request to PENDING and clear installation_id so candidate profile picks it up
+            await crud.update_request(
+                rid, status="PENDING", retry_count=retry, installation_id=None,
+                error_message=f"failover: account {failed_inst} quota exhausted; switching to another account",
+            )
+            if retry_after is not None:
+                retry_after[rid] = time.time() + 1.0  # short cooldown before picking up with alternative
+            return
+        else:
+            # Max retries reached or all accounts out of quota
+            error_text = f"QUOTA_EXHAUSTED: Account {failed_inst or 'active'} has exhausted quota (max retries reached): {error_msg}"
+            await crud.update_request(rid, status="FAILED", error_message=error_text)
+            await _mark_scene_failed(req)
+            logger.error("Request %s FAILED permanently: %s", rid[:8], error_text)
+            return
 
     if "media_owner_unknown" in error_lower or "media_account_mismatch" in error_lower:
         await crud.update_request(rid, status="FAILED", error_message=str(error_msg))

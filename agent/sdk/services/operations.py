@@ -363,6 +363,17 @@ class OperationService:
                     if not _char_matches(c, char_names_set):
                         continue
                     mid = c.get("media_id")
+                    if mid and hasattr(self._client, "is_installation_exhausted"):
+                        from agent.services.execution_audit import media_owner
+                        owner = await media_owner(mid)
+                        if owner and self._client.is_installation_exhausted(owner.get("installation_id")):
+                            if c.get("reference_image_url"):
+                                logger.info("Re-uploading character %s ref to active profile (old profile %s exhausted)",
+                                            c.get("name"), owner.get("installation_id"))
+                                new_mid = await _upload_character_image(self._client, c, pid)
+                                if new_mid:
+                                    await crud.update_character(c["id"], media_id=new_mid)
+                                    mid = new_mid
                     if mid:
                         valid_ids.append(mid)
                     else:
@@ -484,6 +495,21 @@ class OperationService:
             operations = [{"operation": {"name": existing_op}, "status": "MEDIA_GENERATION_STATUS_PENDING"}]
             return await _poll_operations(self._client, operations)
         # else: workflow UUID — fall through and resubmit fresh
+
+        # If image was created on a quota-exhausted profile, re-upload to active profile
+        if image_media_id and hasattr(self._client, "is_installation_exhausted"):
+            from agent.services.execution_audit import media_owner
+            owner = await media_owner(image_media_id)
+            if owner and self._client.is_installation_exhausted(owner.get("installation_id")):
+                url = scene.get(f"{prefix}_image_url")
+                if url:
+                    from agent.worker.processor import _reupload_media
+                    logger.info("Re-uploading scene %s image to active profile (old profile %s exhausted)",
+                                scene.get("id", "")[:12], owner.get("installation_id"))
+                    new_mid = await _reupload_media(url, pid)
+                    if new_mid:
+                        await crud.update_scene(scene["id"], **{f"{prefix}_image_media_id": new_mid})
+                        image_media_id = new_mid
 
         submit_result = await self._client.generate_video(
             start_image_media_id=image_media_id,

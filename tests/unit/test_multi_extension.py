@@ -253,6 +253,55 @@ class TestMultiExtensionPool:
         assert "error" in res
         assert "NO_FLOW_TAB" in res["error"]
 
+    def test_is_quota_error_detects_all_variants(self):
+        from agent.services.flow_client import is_quota_error
+        assert is_quota_error("public_error_user_quota_reached") is True
+        assert is_quota_error("PUBLIC_ERROR_PER_MODEL_DAILY_QUOTA_REACHED") is True
+        assert is_quota_error("RESOURCE_EXHAUSTED: daily limit reached") is True
+        assert is_quota_error("quotaExceeded: User quota exceeded for today") is True
+        assert is_quota_error("User has 0 credits remaining, daily_quota hit") is True
+        assert is_quota_error("429: user quota limit reached") is True
+        assert is_quota_error("random network connection timeout") is False
+        assert is_quota_error(None) is False
+
+    @pytest.mark.asyncio
+    async def test_quota_exhaustion_marks_profile_and_selects_profile_with_credit(self, multi_client):
+        ws_a = FakeWebSocket("ws_a")
+        ws_b = FakeWebSocket("ws_b")
+        multi_client.set_extension(ws_a)
+        multi_client.set_extension(ws_b)
+
+        await multi_client.handle_message({"type": "extension_ready", "installationId": "inst_a", "flowProjectId": "11111111-1111-4111-8111-111111111111"}, ws_a)
+        await multi_client.handle_message({"type": "extension_ready", "installationId": "inst_b", "flowProjectId": "22222222-2222-4222-8222-222222222222"}, ws_b)
+
+        # Initially both are available
+        assert len(multi_client._extension_candidates(require_token=False)) == 2
+
+        # Mark inst_a as quota exhausted
+        multi_client.mark_quota_exhausted("inst_a")
+        assert multi_client.is_installation_exhausted("inst_a") is True
+        assert multi_client.is_installation_exhausted("inst_b") is False
+
+        # Now only inst_b (the one with credit) must be returned!
+        candidates = multi_client._extension_candidates(require_token=False)
+        assert candidates == [ws_b]
+
+        # Check list_extensions reflects quota_exhausted status
+        exts = {e["installation_id"]: e for e in multi_client.list_extensions()}
+        assert exts["inst_a"]["quota_exhausted"] is True
+        assert exts["inst_a"]["available"] is False
+        assert exts["inst_b"]["quota_exhausted"] is False
+        assert exts["inst_b"]["available"] is True
+
+        # Check _batch_project_id uses target installation's project
+        pid = multi_client._batch_project_id("11111111-1111-4111-8111-111111111111", preferred_installation="inst_b")
+        assert pid == "22222222-2222-4222-8222-222222222222"
+
+        # Resetting quota brings inst_a back
+        multi_client.reset_quota_status("inst_a")
+        assert multi_client.is_installation_exhausted("inst_a") is False
+        assert len(multi_client._extension_candidates(require_token=False)) == 2
+
 
 class TestConcurrentRateLimiter:
     @pytest.mark.asyncio
