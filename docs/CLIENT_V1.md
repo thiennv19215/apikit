@@ -31,11 +31,11 @@ Client gửi ảnh dạng **Base64 (`image_base64`)** trực tiếp trong reques
 | | GET | `/v1/jobs/{job_id}/executions` | Lịch sử audit thực thi |
 
 > [!IMPORTANT]
-> **Quy định điều phối dành cho AI Agent:**
-> - API Client V1 (`/v1/...`) hoạt động theo cơ chế **per-job**: Agent phía client phải tự duyệt vòng lặp `for` từng scene và loop thủ công poll từng `job_id` cho đến khi xong.
-> - **Đối với AI Agent (Antigravity, Claude Code, Cursor...):** Luôn **ƯU TIÊN HÀNG ĐẦU dùng Batch API (`/api/requests/batch`)** để server backend tự động điều phối hàng đợi (throttling 5 request song song, 10s cooldown, failover profile).
-> - **CHỈ sử dụng Client V1 API (loop thủ công)** khi hệ thống Batch của Agent gặp sự cố, kẹt hàng đợi, hoặc cần can thiệp xử lý riêng lẻ từng scene bị lỗi.
-> - **Không có endpoint Upload trên Client V1:** Truyền chuỗi Base64 trực tiếp vào trường `image_base64` của `input_images`.
+> **Quy định điều phối dành cho AI Agent & Client:**
+> - API Client V1 (`/v1/...`) hỗ trợ cả tạo tác vụ đơn lẻ (`/v1/.../generations`) và tạo hàng loạt theo lô qua Batch API (`/v1/images/generations/batch`, `/v1/videos/generations/batch`).
+> - **Cơ chế Batch tự động:** Khuyên dùng các endpoint Batch để gửi toàn bộ danh sách phân cảnh trong 1 request. Server backend tự động đưa vào hàng đợi SQLite queue và điều phối (tối đa 5 request song song, 10s cooldown, tự động failover quota đa tài khoản).
+> - **Tra cứu trạng thái:** Dùng `POST /v1/jobs/status` với danh sách `job_ids` để theo dõi tiến độ cả lô.
+> - **Không có endpoint Upload trên Client V1:** Truyền chuỗi Base64 trực tiếp vào trường `image_base64` của `input_images`. Server tự động hash SHA-256 cache và upload lên Flow.
 
 ---
 

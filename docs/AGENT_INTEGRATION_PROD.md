@@ -21,10 +21,10 @@ FlowKit cung cấp 2 cơ chế gọi trên **cùng một server / Base URL**:
    - **Tự điều phối:** Backend server worker tự động quản lý queue, tự throttle (tối đa 5 request song song, 10s cooldown), tự động failover sang profile khác khi tài khoản Google Flow chạm quota.
    - **Tối ưu cho Agent:** Agent không phải loop từng scene thủ công, chỉ cần gọi `poll_batch()` để nhận kết quả khi hoàn tất.
 
-2. **Cơ chế 2: CLIENT V1 API (`/v1/...`) — [CHỈ DÙNG DỰ PHÒNG KHI CÓ LỖI]**
-   - **Đặc điểm:** Gửi từng job đơn lẻ per-scene (`POST /v1/images/generations`, `POST /v1/videos/generations`).
-   - **Thủ công:** Agent phía client phải tự viết vòng lặp `for` từng scene, nhận `job_id`, và chạy vòng lặp `while` poll từng job (`v1_poll_job`) tuần tự.
-   - **Chính sách:** **CHỈ kích hoạt khi hệ thống Batch của Agent gặp lỗi**, kẹt hàng đợi, hoặc cần can thiệp xử lý riêng lẻ 1 phân cảnh.
+2. **Cơ chế 2: CLIENT V1 API (`/v1/...`) — [DÀNH CHO CLIENT NGOÀI & CUSTOM INTEGRATIONS]**
+   - **Đặc điểm:** Hỗ trợ cả sinh đơn lẻ (`POST /v1/images/generations`, `POST /v1/videos/generations`) lẫn **Batch API** (`POST /v1/images/generations/batch`, `POST /v1/videos/generations/batch`).
+   - **Tự điều phối:** Khi nộp batch qua V1, server backend cũng tự động đưa vào SQLite queue và điều phối (tối đa 5 request song song, 10s cooldown, failover profile).
+   - **Polling:** Tra cứu trạng thái cả lô thuận tiện qua `POST /v1/jobs/status` với danh sách `job_ids`.
 
 ---
 
