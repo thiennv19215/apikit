@@ -43,12 +43,42 @@ app = MCPServer("flowkit")
 
 @app.tool()
 def flowkit_health() -> str:
-    """Check status of FlowKit server and verify Chrome Extension connection."""
+    """Check status of FlowKit server, extension connection, and Google Flow tab state."""
     try:
         data = client.health()
         return json.dumps(data, indent=2)
     except Exception as e:
         return json.dumps({"status": "error", "error": str(e), "hint": "Ensure FlowKit is running: python -m agent.main"})
+
+
+@app.tool()
+def flowkit_list_accounts() -> str:
+    """List all connected browser profiles/extensions with quota availability and Flow tab status."""
+    try:
+        data = client.list_accounts()
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+@app.tool()
+def flowkit_reset_account_quota(installation_id: str) -> str:
+    """Reset quota status for a specific browser profile/extension."""
+    try:
+        data = client.reset_account_quota(installation_id)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+@app.tool()
+def flowkit_reset_all_accounts_quota() -> str:
+    """Reset quota status for all connected browser profiles/extensions."""
+    try:
+        data = client.reset_all_accounts_quota()
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
 
 
 @app.tool()
@@ -345,6 +375,16 @@ def flowkit_v1_concat_videos(
             music_volume=music_volume,
         )
         return json.dumps(res, indent=2)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+@app.tool()
+def flowkit_v1_poll_job(job_id: str, interval: float = 10.0, timeout: float = 900.0) -> str:
+    """Poll a Client V1 generation job until status is complete or failed."""
+    try:
+        job = client.poll_job(job_id=job_id, interval=interval, timeout=timeout)
+        return json.dumps(job, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)})
 

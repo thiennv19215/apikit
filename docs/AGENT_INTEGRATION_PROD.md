@@ -35,6 +35,7 @@ Quy trình tự động hóa của AI Agent diễn ra theo 3 bước:
 3. **Model Video:** Luôn sử dụng `"omni_flash"`.
 4. **Prompt Video:** Agent nên định dạng theo **Sub-clip timing** để đạt chất lượng chuyển động tốt nhất:
    - Ví dụ: `0-3s: The camera slowly tracks forward as the samurai walks in neon rain. 3-6s: He unsheathes his katana with glowing blue light.`
+5. **Cơ chế Multi-Profile & Auto-Failover Quota:** Server tự động quản lý pool nhiều tài khoản Google Flow, tự động phát hiện lỗi quota (`public_error_user_quota_reached`, `RESOURCE_EXHAUSTED`), đưa profile cạn quota vào cooldown 12h và failover sang profile khác có credit, tự động nạp lại ảnh base64 mà không làm gián đoạn tác vụ của Agent.
 
 ---
 
@@ -366,9 +367,9 @@ res = client.v1_generate_video(
 job_id = res["jobs"][0]["id"]
 print(f"Đã tạo job: {job_id}")
 
-# 4. Tra cứu trạng thái
-status = client.v1_get_job(job_id)
-print(status)
+# 4. Tra cứu hoặc chờ hoàn tất (poll)
+job = client.poll_job(job_id, interval=10.0, timeout=900.0)
+print(f"Video hoàn tất: {job.get('result_url')}")
 ```
 
 ---
@@ -385,5 +386,5 @@ When asked to generate videos or images, follow these rules:
 3. Structure 8s video prompts with sub-clip timing: "0-3s: [action]. 3-6s: [action]. 6-8s: [action]."
 4. Video duration must be one of: 4, 6, 8, or 10 seconds.
 5. Send images strictly as base64 strings in input_images. Never pass raw media UUIDs.
-6. After submitting generation, poll check_job_status every 10 seconds until status is "complete", then provide the output URL.
+6. After submitting generation, poll check_job_status every 10 seconds (or use poll_job) until status is "complete", then provide the output URL.
 ```

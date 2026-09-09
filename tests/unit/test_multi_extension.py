@@ -302,6 +302,33 @@ class TestMultiExtensionPool:
         assert multi_client.is_installation_exhausted("inst_a") is False
         assert len(multi_client._extension_candidates(require_token=False)) == 2
 
+    @pytest.mark.asyncio
+    async def test_accounts_api_endpoints(self, multi_client, monkeypatch):
+        from agent.main import app
+        from httpx import AsyncClient, ASGITransport
+        import agent.api.flow as flow_api
+
+        monkeypatch.setattr(flow_api, "get_flow_client", lambda: multi_client)
+
+        ws_a = FakeWebSocket("ws_a")
+        multi_client.set_extension(ws_a)
+        await multi_client.handle_message({"type": "extension_ready", "installationId": "inst_1"}, ws_a)
+        multi_client.mark_quota_exhausted("inst_1")
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get("/api/flow/accounts")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["total"] == 1
+            assert data["quota_exhausted"] == 1
+
+            reset_resp = await ac.post("/api/flow/accounts/inst_1/reset-quota")
+            assert reset_resp.status_code == 200
+
+            reset_all_resp = await ac.post("/api/flow/accounts/reset-all-quota")
+            assert reset_all_resp.status_code == 200
+
 
 class TestConcurrentRateLimiter:
     @pytest.mark.asyncio

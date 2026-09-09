@@ -171,6 +171,24 @@ class FlowKitClient:
         """Check Client V1 API readiness and capabilities."""
         return self._request("GET", "/v1/health")
 
+    # ── 1b. Accounts & Multi-Profile Quota Management ──
+
+    def list_accounts(self) -> Dict[str, Any]:
+        """List all connected browser profiles/extensions with quota availability.
+        
+        Returns:
+            {"total": int, "available": int, "quota_exhausted": int, "accounts": [...]}
+        """
+        return self._request("GET", "/api/flow/accounts")
+
+    def reset_account_quota(self, installation_id: str) -> Dict[str, Any]:
+        """Reset quota status for a specific browser profile."""
+        return self._request("POST", f"/api/flow/accounts/{installation_id}/reset-quota")
+
+    def reset_all_accounts_quota(self) -> Dict[str, Any]:
+        """Reset quota status for all connected browser profiles."""
+        return self._request("POST", "/api/flow/accounts/reset-all-quota")
+
     # ── 2. Materials & Models ──
 
     def list_materials(self) -> List[Dict[str, Any]]:

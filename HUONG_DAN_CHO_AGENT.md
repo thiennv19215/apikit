@@ -48,7 +48,19 @@ Agent kiểm tra endpoint:
 ```bash
 curl -s http://127.0.0.1:8100/health
 ```
-Kết quả hợp lệ: `{"status": "ok", "extension_connected": true, ...}`.
+Phản hồi mẫu:
+```json
+{
+  "status": "ok",
+  "version": "0.2.0",
+  "extension_connected": true,
+  "has_flow_tab": true,
+  "ws": {"connected": true, "total_messages": 12}
+}
+```
+> [!TIP]
+> - `has_flow_tab`: `true` báo hiệu Extension đã phát hiện ít nhất một tab Google Labs Flow đang mở, ngăn ngừa triệt để lỗi `No current window`.
+> - Nếu `has_flow_tab: false`, hệ thống sẽ trả mã cảnh báo `NO_FLOW_TAB` (hoặc `status: "waiting_for_flow_tab"`), nhắc nhở mở tab Flow trước khi nộp tác vụ.
 
 ---
 
@@ -128,6 +140,17 @@ client.poll_batch(video_id=vid_id, req_type="GENERATE_VIDEO", interval=15)
 
 # 9. Lồng tiếng AI (TTS)
 client.generate_narrator(vid_id)
+
+# 10. Quản lý Multi-Account & Quota Failover:
+accounts = client.list_accounts()
+print(f"Tổng tài khoản: {accounts['total']}, Khả dụng: {accounts['available']}, Hết quota: {accounts['quota_exhausted']}")
+
+# Khi muốn reset trạng thái quota của 1 profile hoặc tất cả:
+# client.reset_account_quota("<installation_id>")
+# client.reset_all_accounts_quota()
+
+# 11. Chờ Job hoàn tất trong Client V1 API:
+# job = client.poll_job(job_id="<job_id>", interval=10.0, timeout=900.0)
 print("Pipeline hoan tat xuat sac!")
 ```
 
@@ -151,7 +174,10 @@ Dành cho: Claude Desktop, Antigravity, Cursor, Windsurf, Zed, Continue.dev ho�
 #### Danh sách công cụ (Tools) được expose tự động:
 | Tên Tool | Mô tả |
 |---|---|
-| `flowkit_health` | Kiểm tra server backend và kết nối extension |
+| `flowkit_health` | Kiểm tra server backend, kết nối extension và trạng thái tab Flow |
+| `flowkit_list_accounts` | Xem danh sách browser profile/extension kết nối, quota khả dụng |
+| `flowkit_reset_account_quota` | Reset trạng thái quota cho 1 profile cụ thể |
+| `flowkit_reset_all_accounts_quota` | Reset trạng thái quota cho toàn bộ profile |
 | `flowkit_list_materials` | Lấy danh sách style mỹ thuật (realistic, 3d_pixar, anime...) |
 | `flowkit_create_project` | Khởi tạo dự án kịch bản mới |
 | `flowkit_create_character` | Thêm nhân vật / địa điểm / đạo cụ |
@@ -164,6 +190,7 @@ Dành cho: Claude Desktop, Antigravity, Cursor, Windsurf, Zed, Continue.dev ho�
 | `flowkit_poll_batch` | Chờ hàng loạt tác vụ hoàn tất tự động |
 | `flowkit_generate_narrator` | Sinh giọng đọc TTS cho các cảnh |
 | `flowkit_v1_generate_video` | Gọi trực tiếp Omni Flash video generation |
+| `flowkit_v1_poll_job` | Tự động poll tiến độ một job sinh video/ảnh cho đến khi xong |
 
 Agent chỉ việc gọi tool như hàm native mà không cần biết chi tiết HTTP request bên dưới.
 
@@ -193,6 +220,18 @@ curl -X POST http://127.0.0.1:8100/api/requests/batch \
 curl -s "http://127.0.0.1:8100/api/requests/batch-status?video_id=<VID>&type=GENERATE_IMAGE"
 # Phản hồi: {"total": 10, "pending": 5, "processing": 2, "completed": 3, "failed": 0, "done": false}
 # Khi done=true: toàn bộ request đã xử lý xong.
+```
+
+#### Quản lý Multi-Account & Reset Quota:
+```bash
+# Danh sách tài khoản kết nối & trạng thái quota:
+curl -s http://127.0.0.1:8100/api/flow/accounts
+
+# Reset quota cho một profile cụ thể:
+curl -X POST http://127.0.0.1:8100/api/flow/accounts/<installation_id>/reset-quota
+
+# Reset quota cho toàn bộ profile:
+curl -X POST http://127.0.0.1:8100/api/flow/accounts/reset-all-quota
 ```
 
 ---
@@ -240,7 +279,7 @@ curl -s "http://127.0.0.1:8100/api/requests/batch-status?video_id=<VID>&type=GEN
 
 ---
 
-## 5. 13 QUY TẮC BẤT BIẾN (CRITICAL RULES) BẮT BUỘC AGENT PHẢI THEO
+## 5. 14 QUY TẮC BẤT BIẾN (CRITICAL RULES) BẮT BUỘC AGENT PHẢI THEO
 
 1. **Media ID luôn là UUID:** Định dạng chuẩn `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`. Tuyệt đối không dùng chuỗi `CAMS...` hay base64.
 2. **Scene Prompts = CHỈ HÀNH ĐỘNG (Action only):** Không mô tả ngoại hình nhân vật trong prompt cảnh. Hình ảnh nhân vật do các ảnh tham chiếu (`imageInputs`) quyết định.
@@ -256,6 +295,7 @@ curl -s "http://127.0.0.1:8100/api/requests/batch-status?video_id=<VID>&type=GEN
 11. **Thoại nhân vật trong ngoặc kép:** Đặt lời thoại trong dấu ngoặc kép: `Luna says "Goodnight."` Tối đa 10-15 từ mỗi phân đoạn 2-3s.
 12. **Cập nhật cảnh bằng PATCH:** Sử dụng `PATCH /api/scenes/{id}` để cập nhật prompt, video_prompt, narrator_text. Không xóa đi tạo lại.
 13. **Tránh trigger bộ lọc Google Safety đối với nhân vật nổi tiếng:** Khi làm phim tài liệu về nhân vật có thật, đặt tên nhân vật dạng bí danh tiếng Anh (ví dụ: `The Commander`, `The Diplomat`), không dùng tên thật hoặc chức danh chính trị nhạy cảm trong prompt.
+14. **Media ID gắn liền với tài khoản (Account-scoped) & Cơ chế Multi-Account Quota Failover:** Tài nguyên Google Flow không thể chia sẻ giữa các tài khoản khác nhau. Khi một tài khoản chạm hạn mức quota (`public_error_user_quota_reached` hoặc `RESOURCE_EXHAUSTED`), FlowKit tự động đánh dấu tài khoản đó vào chế độ chờ 12 giờ, đồng thời tự động điều hướng sang profile khả dụng tiếp theo có credit và tự động tải lại (re-upload) ảnh tham chiếu nếu cần.
 
 ---
 

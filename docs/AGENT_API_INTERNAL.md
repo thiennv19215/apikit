@@ -28,6 +28,7 @@ Tài liệu này dành riêng cho **FlowKit Agent, CLI tools và các kịch b�
 10. [Models & Providers Cấu hình](#10-models--providers-cấu-hình)
 11. [Âm nhạc (Music / Suno)](#11-âm-nhạc-music--suno)
 12. [Extension Gateway & WebSockets](#12-extension-gateway--websockets)
+13. [Quản lý Tài khoản & Multi-Profile Quota Failover](#13-quản-lý-tài-khoản--multi-profile-quota-failover)
 
 ---
 
@@ -35,8 +36,12 @@ Tài liệu này dành riêng cho **FlowKit Agent, CLI tools và các kịch b�
 
 | Method | Endpoint | Mục đích | Phản hồi mẫu |
 |---|---|---|---|
-| `GET` | `/health` | Kiểm tra trạng thái server và kết nối Chrome Extension | `{"status": "ok", "version": "0.2.0", "extension_connected": true, "ws": {"connected": true}}` |
-| `GET` | `/api/health` | Alias kiểm tra cho Extension và MCP tools | `{"ok": true, "status": "ready"}` |
+| `GET` | `/health` | Kiểm tra trạng thái server, kết nối Chrome Extension và tab Flow | `{"status": "ok", "version": "0.2.0", "extension_connected": true, "has_flow_tab": true, "ws": {"connected": true}}` |
+| `GET` | `/api/health` | Alias kiểm tra cho Extension và MCP tools | `{"ok": true, "status": "ready", "provider_accounts": 2, "video_lite_ready_accounts": 2, "has_flow_tab": true}` |
+
+> [!NOTE]
+> - `has_flow_tab`: `true` đảm bảo extension đang gắn kết với ít nhất một tab Google Labs Flow.
+> - Nếu `has_flow_tab: false`, hệ thống phản hồi `status: "waiting_for_flow_tab"` và `/v1/health` báo lỗi `NO_FLOW_TAB` để ngăn chặn lỗi `No current window`.
 
 ---
 
@@ -243,3 +248,46 @@ Cổng giao tiếp thời gian thực 2 chiều giữa FlowKit Server và Chrome
 | `WS` | `/ws` | Kênh kết nối chính của Chrome Extension |
 | `WS` | `/ws/dashboard` | Kênh push sự kiện realtime về Side Panel UI của Extension |
 | `POST` | `/api/ext/callback` | HTTP fallback nhận kết quả khi mạng WebSocket chập chờn |
+
+---
+
+## 13. Quản lý Tài khoản & Multi-Profile Quota Failover
+
+Hỗ trợ kết nối nhiều hồ sơ Google Chrome (multi-profile/multi-extension) cùng lúc. Khi một tài khoản gặp lỗi hết quota (`public_error_user_quota_reached`, `RESOURCE_EXHAUSTED`, v.v.), hệ thống tự động:
+1. Đánh dấu tài khoản đó ở trạng thái `quota_exhausted: true` và đưa vào danh sách cooldown 12 giờ.
+2. Tự động điều hướng các tác vụ đang chờ sang các profile/extension khác còn quota khả dụng.
+3. Đẩy lại request bị ngắt quãng về trạng thái `PENDING` để retry trên tài khoản mới.
+4. Tự động nạp lại (re-upload) ảnh tham chiếu thực thể và phân cảnh sang profile mới do media_id của Google Flow bị giới hạn theo từng tài khoản.
+
+| Method | Endpoint | Mục đích | Phản hồi mẫu |
+|---|---|---|---|
+| `GET` | `/api/flow/accounts` | Danh sách tài khoản kết nối, số lượng khả dụng và hết quota | `{"total": 2, "available": 1, "quota_exhausted": 1, "accounts": [...]}` |
+| `POST` | `/api/flow/accounts/{installation_id}/reset-quota` | Reset trạng thái quota cho một profile cụ thể | `{"status": "ok", "message": "Reset quota status for installation ..."}` |
+| `POST` | `/api/flow/accounts/reset-all-quota` | Reset trạng thái quota cho tất cả profile | `{"status": "ok", "message": "Reset quota status for 2 profiles"}` |
+
+### Mẫu dữ liệu phản hồi `GET /api/flow/accounts`:
+```json
+{
+  "total": 2,
+  "available": 1,
+  "quota_exhausted": 1,
+  "accounts": [
+    {
+      "installation_id": "inst_profile_1",
+      "flow_project_id": "11111111-1111-4111-8111-111111111111",
+      "available": false,
+      "quota_exhausted": true,
+      "unavailable_until": 1788931200,
+      "has_flow_tab": true
+    },
+    {
+      "installation_id": "inst_profile_2",
+      "flow_project_id": "22222222-2222-4222-8222-222222222222",
+      "available": true,
+      "quota_exhausted": false,
+      "unavailable_until": null,
+      "has_flow_tab": true
+    }
+  ]
+}
+```

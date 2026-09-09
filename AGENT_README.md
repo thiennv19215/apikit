@@ -25,7 +25,8 @@ python -m agent.main
 5. Verify health check returns:
 ```bash
 curl -s http://127.0.0.1:8100/health
-# Expect: {"status": "ok", "extension_connected": true, ...}
+# Expect: {"status": "ok", "extension_connected": true, "has_flow_tab": true, ...}
+# Note: If has_flow_tab is false, status indicates NO_FLOW_TAB to prevent "No current window" errors.
 ```
 
 ---
@@ -55,6 +56,10 @@ from flowkit_client import FlowKitClient
 client = FlowKitClient()
 client.health()
 
+# Inspect connected profiles & quota status
+accounts = client.list_accounts()
+print(accounts)  # {"total": 2, "available": 2, "quota_exhausted": 0, "accounts": [...]}
+
 # Create project
 proj = client.create_project(name="Cyberpunk 2099", material="realistic", story="A futuristic thriller")
 pid = proj["id"]
@@ -66,6 +71,9 @@ char = client.create_character(pid, name="Kaelen", entity_type="character",
 # Generate references & poll until complete
 client.batch_generate_refs(pid)
 client.poll_batch(project_id=pid, req_type="GENERATE_REF_IMAGE")
+
+# For Client V1 jobs:
+# job = client.poll_job(job_id)
 ```
 
 ### Way 3: Model Context Protocol Server (`flowkit_mcp.py`)
@@ -80,11 +88,12 @@ Configure FlowKit as an MCP server in Claude Desktop, Cursor, Antigravity, or Ze
   }
 }
 ```
-Exposes native tools: `flowkit_health`, `flowkit_create_project`, `flowkit_create_character`, `flowkit_create_scene`, `flowkit_batch_generate_*`, `flowkit_poll_batch`, `flowkit_v1_generate_video`, etc.
+Exposes native tools: `flowkit_health`, `flowkit_list_accounts`, `flowkit_reset_account_quota`, `flowkit_reset_all_accounts_quota`, `flowkit_create_project`, `flowkit_create_character`, `flowkit_create_scene`, `flowkit_batch_generate_*`, `flowkit_poll_batch`, `flowkit_v1_generate_video`, `flowkit_v1_poll_job`, etc.
 
 ### Way 4: REST Batch API
 Endpoints are documented in `docs/AGENT_API_INTERNAL.md` and `docs/CLIENT_V1.md`.
 Batch queue endpoint: `POST /api/requests/batch` with aggregate polling at `GET /api/requests/batch-status`.
+Account management endpoints: `GET /api/flow/accounts`, `POST /api/flow/accounts/{id}/reset-quota`, `POST /api/flow/accounts/reset-all-quota`.
 
 ---
 
@@ -95,3 +104,4 @@ Batch queue endpoint: `POST /api/requests/batch` with aggregate polling at `GET 
 3. **References must exist before scenes:** Verify all entities have `media_id` before starting scene generation.
 4. **No throwaway scripts:** Never loop curl requests. Submit all items via `POST /api/requests/batch`; server throttles (max 5 concurrent, 10s cooldown).
 5. **Video Prompts use sub-clip timing:** Structure 8s video prompt into segments: `0-3s: [action]. 3-6s: [action]. 6-8s: [action].`
+6. **Media IDs are account-scoped & Auto-failover:** Assets cannot be shared across accounts. On quota exhaustion (`public_error_user_quota_reached`, `RESOURCE_EXHAUSTED`), FlowKit automatically enters 12h cooldown, fails over to another connected profile with credit, and re-uploads reference images.
