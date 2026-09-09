@@ -49,9 +49,26 @@ Do not send Omni workflow names to the legacy Veo `batchCheckAsyncVideoGeneratio
 
 ## Supplying images
 
-`POST /api/flow/upload-image` is not a multipart upload endpoint. Its `file_path` is an absolute path on the **FlowKit server**, not on the calling server.
+`POST /api/flow/upload-image` supports both `image_base64` (recommended for remote callers/different servers) and `file_path` (for local server execution).
 
-For a remote integration, first stage the file on the FlowKit host using an authenticated transfer such as SFTP/SCP, a private shared volume, or a separately secured upload service. Use a unique per-job directory, validate file size/type, and make the file readable by the FlowKit service account. Then call:
+### Remote Caller (Direct Base64):
+
+For remote integrations or callers running on separate machines, send the image directly as Base64:
+
+```bash
+curl -fsS -X POST "$FLOWKIT_BASE_URL/api/flow/upload-image" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "image_base64": "<base64_encoded_image_string>",
+    "mime_type": "image/jpeg",
+    "project_id": "FLOW_PROJECT_ID",
+    "file_name": "start.jpg"
+  }'
+```
+
+### Local File on FlowKit Host:
+
+When running locally on the FlowKit machine, you can still supply `file_path`:
 
 ```bash
 curl -fsS -X POST "$FLOWKIT_BASE_URL/api/flow/upload-image" \
@@ -69,7 +86,7 @@ Response:
 {"media_id":"FLOW_MEDIA_ID","raw":{}}
 ```
 
-Use the returned `media_id` in generation requests. Never pass a caller-local path such as `/tmp/image.jpg` unless that exact file also exists on the FlowKit server.
+Use the returned `media_id` in generation requests.
 
 ## Prompts
 

@@ -193,17 +193,6 @@ async def test_v1_rejects_direct_media_ids():
 
 
 @pytest.mark.asyncio
-async def test_v1_characters_disabled():
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        resp = await ac.get("/v1/characters")
-        assert resp.status_code == 404
-        post_resp = await ac.post("/v1/characters", json={"name": "Test"})
-        assert post_resp.status_code == 404
-
-
-@pytest.mark.skip(reason="Temporarily disabled /v1/characters")
-@pytest.mark.asyncio
 async def test_character_crud_endpoints():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:

@@ -22,6 +22,21 @@ use the pinned `FLOW_PROJECT_ID`. Without either you get `NO_FLOW_PROJECT`.
 
 ## Step 2: Upload image
 
+**Via Base64 (recommended when calling from another server):**
+
+```bash
+curl -s -X POST http://127.0.0.1:8100/api/flow/upload-image \
+  -H "Content-Type: application/json" \
+  -d '{
+    "image_base64": "<base64_string_or_data_uri>",
+    "mime_type": "image/png",
+    "project_id": "<PID>",
+    "file_name": "descriptive_name.png"
+  }'
+```
+
+**Via Local File Path (when running locally on the FlowKit host):**
+
 ```bash
 curl -s -X POST http://127.0.0.1:8100/api/flow/upload-image \
   -H "Content-Type: application/json" \
@@ -33,7 +48,9 @@ curl -s -X POST http://127.0.0.1:8100/api/flow/upload-image \
 ```
 
 **Parameters:**
-- `file_path` (required): Absolute path to local image file (PNG, JPG, WebP)
+- `image_base64` (optional): Base64-encoded image string (with or without `data:image/...;base64,` prefix). Required if `file_path` is not provided.
+- `file_path` (optional): Absolute path to local image file on FlowKit server (PNG, JPG, WebP). Required if `image_base64` is not provided.
+- `mime_type` (optional): Mime type (e.g. `image/png`, `image/jpeg`). Inferred if omitted.
 - `project_id` (optional): Project to associate the upload with
 - `file_name` (optional): Descriptive filename, defaults to `image.png`
 

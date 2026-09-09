@@ -28,7 +28,10 @@ from agent.api.models import router as models_router
 from agent.api.providers import router as providers_router
 from agent.api.active_project import router as active_project_router
 from agent.api.v1.generations import router as v1_generations_router
-# from agent.api.v1.characters import router as v1_characters_router  # Tam bo v1 characters endpoint
+from agent.api.v1.characters import router as v1_characters_router
+from agent.api.v1.materials import router as v1_materials_router
+from agent.api.v1.audio import router as v1_audio_router
+from agent.api.v1.concat import router as v1_concat_router
 from agent.api.v1.health import router as v1_health_router, maintenance_response
 from agent.worker.processor import get_worker_controller
 from agent.services.flow_client import get_flow_client
@@ -164,7 +167,10 @@ app.include_router(models_router)
 app.include_router(providers_router)
 app.include_router(active_project_router)
 app.include_router(v1_generations_router)
-# app.include_router(v1_characters_router)  # Tam bo v1 characters endpoint
+app.include_router(v1_characters_router)
+app.include_router(v1_materials_router)
+app.include_router(v1_audio_router)
+app.include_router(v1_concat_router)
 app.include_router(v1_health_router)
 
 

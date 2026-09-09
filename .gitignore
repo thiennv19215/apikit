@@ -24,4 +24,7 @@ ds-bundle/
 .design-sync/node_modules
 _metadata/
 pytest_temp/
+.pytest_temp/
+.pytest-tmp*
+.pytest_cache/
 *.zip

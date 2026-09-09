@@ -161,10 +161,19 @@ Dành cho Agent khi cần thực hiện thao tác trực tiếp với phiên Goo
 **Mẫu Upload ảnh (`POST /api/flow/upload-image`):**
 ```json
 {
+  "image_base64": "<base64_string>",
+  "mime_type": "image/png",
+  "project_id": "<FLOW_PROJECT_ID>",
+  "file_name": "reference_luna.png"
+}
+```
+*Hoặc upload qua đường dẫn local:*
+```json
+{
   "file_path": "C:/images/reference_luna.png"
 }
 ```
-*Trả về:* `{"media_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx", "url": "..."}`
+*Trả về:* `{"media_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx", "raw": {...}}`
 
 ---
 

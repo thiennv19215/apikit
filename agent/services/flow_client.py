@@ -1156,7 +1156,7 @@ class FlowClient:
 
             payload = await self._batch_payload(
                 fb.RPC_UPLOAD_IMAGE,
-                fb.upload_request(image_base64, pid, mime_type, file_name),
+                fb.upload_request(clean_b64, pid, mime_type, file_name),
                 fb.CAPTCHA_IMAGE, timeout=120,
                 preferred_installation=target_inst,
                 preferred_project_id=pid,
@@ -1464,13 +1464,14 @@ class FlowClient:
         Response: {media: {name: "uuid", ...}, workflow: {...}}
         We store media.name as the mediaId for video generation.
         """
+        clean_b64 = image_base64.split(",")[-1].strip()
         body = {
             "clientContext": {
                 "projectId": project_id,
                 "tool": "PINHOLE",
             },
             "fileName": file_name,
-            "imageBytes": image_base64,
+            "imageBytes": clean_b64,
             "isHidden": False,
             "isUserUploaded": True,
             "mimeType": mime_type,

@@ -20,7 +20,8 @@ page can sign a Flow request, so nothing works headless.
 - Always use `/fk-*` skills — all rules and workflows live inside each skill
 - Never write scripts to loop API calls — use `POST /api/requests/batch`
 - `media_id` is always UUID format (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`), never `CAMS...` strings
-- **On any pipeline error** (request `FAILED`, stuck `PROCESSING`, `extension_connected: false`, HTTP 4xx/5xx from `:8100`, YouTube `HttpError`, error strings like `UNSAFE_GENERATION` / `not found` / `CAPTCHA` / `NO_AT_TOKEN` / `NO_FLOW_PROJECT` / `UNSUPPORTED_ON_BATCH_API`): invoke `/fk-doctor` before guessing a fix
+- **On any pipeline error** (request `FAILED`, stuck `PROCESSING`, `extension_connected: false`, HTTP 4xx/5xx from `:8100`, YouTube `HttpError`, error strings like `UNSAFE_GENERATION` / `not found` / `CAPTCHA` / `NO_AT_TOKEN` / `NO_FLOW_PROJECT` / `UNSUPPORTED_ON_BATCH_API` / `MEDIA_ACCOUNT_MISMATCH` / `MEDIA_OWNER_UNKNOWN`): invoke `/fk-doctor` before guessing a fix
+- **Media IDs are account-scoped**: Google Flow assets cannot be shared across accounts/projects. When switching accounts due to quota exhaustion, re-upload original images to get fresh UUIDs, or supply `image_base64`.
 - `flow_key_present: false` is **normal** — the current transport has no bearer token
 
 ## Since Flow moved (September 2026)

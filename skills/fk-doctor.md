@@ -6,7 +6,7 @@ Diagnose any FlowKit error and prescribe a fix. Knows the full error taxonomy ac
 - Any `/api/requests/*` response has `status=FAILED` or `error_message` is set
 - A request has been `PROCESSING` for > 10 minutes with no progress
 - `GET /health` returns `extension_connected: false`
-- User reports any error string containing: `UNSAFE_GENERATION`, `QUOTA`, `not found`, `CAPTCHA`, `UNUSUAL_ACTIVITY`, `NO_AT_TOKEN`, `NO_FLOW_PROJECT`, `UNSUPPORTED_ON_BATCH_API`, `NO_FLOW_KEY`, `NO_FLOW_TAB`, `FLOW_TAB_DISCARDED`, `extension_switched`, `Failed to fetch`, `MODEL_ACCESS_DENIED`, `PAYGATE_TIER_TWO`, `invalidTags`, `quotaExceeded`, `invalid_grant`
+- User reports any error string containing: `UNSAFE_GENERATION`, `QUOTA`, `not found`, `CAPTCHA`, `UNUSUAL_ACTIVITY`, `NO_AT_TOKEN`, `NO_FLOW_PROJECT`, `UNSUPPORTED_ON_BATCH_API`, `NO_FLOW_KEY`, `NO_FLOW_TAB`, `FLOW_TAB_DISCARDED`, `extension_switched`, `Failed to fetch`, `MODEL_ACCESS_DENIED`, `PAYGATE_TIER_TWO`, `invalidTags`, `quotaExceeded`, `invalid_grant`, `MEDIA_ACCOUNT_MISMATCH`, `MEDIA_OWNER_UNKNOWN`
 - User asks "why did X fail", "what's wrong with the pipeline", "why is this stuck", "tại sao X lỗi", "lỗi gì vậy"
 - An HTTP 4xx/5xx reaches the main agent from any endpoint under `127.0.0.1:8100`
 - A YouTube upload returns `HttpError` from `googleapiclient`
@@ -144,6 +144,8 @@ Detection lives in `agent/worker/_parsing.py:_is_error`. A result is treated as 
 | `PUBLIC_ERROR_UNUSUAL_ACTIVITY` | A reCAPTCHA token was replayed — they are single-use | Retried as a captcha error | Usually self-clears; if it persists the extension is reusing a token, reload it |
 | `no ogiZ0b envelope in response` | The RPC answered but not with the payload we came for — usually a signed-out page returning an HTML redirect | Retried with backoff | Re-sign in on the Flow tab |
 | `Polling timeout after Ns: Media not found.` | The job never produced media inside the budget | Terminal after `MAX_RETRIES` | The quoted complaint is a **diagnostic, not the cause** — finished jobs report it too. Check the Flow UI: if the clip is there, raise `VIDEO_POLL_TIMEOUT` |
+| `MEDIA_ACCOUNT_MISMATCH` | Input `media_id` belongs to another Flow account/profile. Google Flow assets cannot be shared across accounts | **Terminal — not retried** | (1) Re-upload the original image/file to the active account via `POST /api/upload-image` (or pass `image_base64`). (2) Patch the scene/character with the new UUID (`PATCH /api/scenes/{id}`). (3) Re-submit request. |
+| `MEDIA_OWNER_UNKNOWN` | Raw UUID input has no record of owner/project in local DB | **Terminal — not retried** | Re-upload original image via `POST /api/upload-image` on current profile. |
 
 `NO_AT_TOKEN`, `NO_FLOW_TAB` and `FLOW_TAB_DISCARDED` are profile-local, so
 with several extension profiles connected the agent fails the request over to
@@ -203,12 +205,13 @@ When the user describes a symptom in plain language, map it here first.
 | YouTube upload `invalidTags` | Tag-char overflow — quote overhead counts (spaces → +2 per tag) |
 | Python `cryptography` arch mismatch | Use `python3.10`, not `python3.13` (x86/arm64 binary mismatch) |
 | `curl: (7) Failed to connect to 127.0.0.1:8100` | Agent not running — `python -m agent.main` |
+| Switched Google account, now fails with `MEDIA_ACCOUNT_MISMATCH` or `not found` | Flow assets are account-scoped. Re-upload original images via `/fk-upload-image` on the new account, PATCH new `media_id` into scene/character, and re-submit. Or supply `image_base64`. |
 
 ## Worker retry policy (`processor.py:_handle_failure`)
 
 Decision order — stop at first match:
 
-0. **`UNSUPPORTED_ON_BATCH_API` / `NO_FLOW_PROJECT`** → FAILED immediately. These are configuration answers, not something a retry can reach.
+0. **`UNSUPPORTED_ON_BATCH_API` / `NO_FLOW_PROJECT` / `MEDIA_ACCOUNT_MISMATCH` / `MEDIA_OWNER_UNKNOWN`** → FAILED immediately. Non-retryable configuration or cross-account asset mismatches.
 1. **`"not found"` in message** → `_recover_entity_not_found()` re-uploads media, marks PENDING.
 2. **`reconnected` / `disconnected` / `switched`** → PENDING, keep `retry_count`.
 3. **`captcha` / `recaptcha`** → PENDING if retry_count < 10; else FAILED.

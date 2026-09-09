@@ -7,17 +7,26 @@ Client gửi ảnh dạng **Base64 (`image_base64`)** trực tiếp trong reques
 
 ---
 
-## 1. Danh sách Endpoint Client
+## 1. Danh sách Endpoint Client V1
 
-| Method | Endpoint | Mô tả |
-|---|---|---|
-| GET | `/v1/health` | Kiểm tra trạng thái hệ thống, khả năng nhận tác vụ và danh sách capabilities |
-| POST | `/v1/images/generations` | 202 Accepted, tạo tác vụ sinh ảnh Base64 (Nano Banana Pro / Banana 2) |
-| POST | `/v1/videos/generations` | 202 Accepted, tạo tác vụ sinh video Gemini Omni Flash (First frame, Start+End, R2V) |
-| POST | `/v1/jobs/status` | Tra cứu trạng thái nhiều job |
-| GET | `/v1/jobs/{job_id}` | Tra cứu trạng thái một job |
-| GET | `/v1/jobs/status/{job_id}` | Alias tra cứu trạng thái |
-| GET | `/v1/jobs/{job_id}/executions` | Lịch sử audit thực thi; 404 nếu không tồn tại |
+| Nhóm | Method | Endpoint | Mô tả |
+|---|---|---|---|
+| **System** | GET | `/v1/health` | Kiểm tra trạng thái hệ thống, khả năng nhận tác vụ và capabilities |
+| **Visual Styles** | GET | `/v1/materials` | Danh sách phong cách mỹ thuật ảnh (`realistic`, `3d_pixar`, `anime`...) |
+| | GET | `/v1/materials/{id}` | Chi tiết hướng dẫn prompt và phong cách của một style |
+| **Media Gen** | POST | `/v1/images/generations` | 202 Accepted, tạo tác vụ sinh ảnh Base64 (Nano Banana Pro / Banana 2) |
+| | POST | `/v1/videos/generations` | 202 Accepted, tạo tác vụ sinh video Gemini Omni Flash (First frame, Start+End, R2V) |
+| **Audio & TTS** | GET | `/v1/audio/voices` | Danh sách mẫu giọng đọc (voice templates) |
+| | POST | `/v1/audio/speech` | Sinh file âm thanh giọng đọc (TTS) từ văn bản kèm Base64 và URL |
+| | POST | `/v1/audio/music` | 202 Accepted, sinh nhạc nền AI qua Suno |
+| | GET | `/v1/audio/music/{task_id}` | Tra cứu trạng thái và link bài nhạc Suno |
+| **Post-Process** | POST | `/v1/videos/concat` | Ghép nhiều clip video + lồng tiếng voiceover + nhạc nền thành MP4 hoàn chỉnh |
+| **Entities** | GET | `/v1/characters` | Liệt kê danh sách nhân vật/thực thể cố định |
+| | POST | `/v1/characters` | Tạo mới nhân vật kèm ảnh tham chiếu |
+| | GET | `/v1/characters/{id}` | Lấy thông tin chi tiết nhân vật |
+| **Jobs** | POST | `/v1/jobs/status` | Tra cứu trạng thái nhiều job |
+| | GET | `/v1/jobs/{job_id}` | Tra cứu trạng thái một job |
+| | GET | `/v1/jobs/{job_id}/executions` | Lịch sử audit thực thi |
 
 > [!IMPORTANT]
 > **Không có endpoint Upload trên Client V1:** Khách hàng không cần gọi bước upload riêng biệt nào. Truyền chuỗi Base64 trực tiếp vào trường `image_base64` của `input_images`.
@@ -48,7 +57,49 @@ Khi hệ thống sẵn sàng và extension Google Flow đã kết nối:
 
 ---
 
-## 3. Sinh Video: Gemini Omni Flash (`POST /v1/videos/generations`)
+## 3. Sinh Hình Ảnh (`POST /v1/images/generations`)
+
+Endpoint tạo tác vụ sinh ảnh bằng mô hình Banana Pro / Banana 2. Hỗ trợ Text-to-Image và Image-to-Image (tham chiếu Base64).
+
+### Tham số Request Body:
+- `prompt` (string, bắt buộc): Mô tả hình ảnh cần tạo.
+- `aspect_ratio` (string, tuỳ chọn): Tỉ lệ ảnh. Giá trị chuẩn: `IMAGE_ASPECT_RATIO_LANDSCAPE` (16:9, mặc định), `IMAGE_ASPECT_RATIO_PORTRAIT` (9:16), `IMAGE_ASPECT_RATIO_SQUARE` (1:1), `IMAGE_ASPECT_RATIO_PORTRAIT_FOUR_THREE` (3:4), `IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE` (4:3). *Hỗ trợ alias rút gọn: `"16:9"`, `"9:16"`, `"1:1"`, `"PORTRAIT"`, `"LANDSCAPE"`.*
+- `model` (string, tuỳ chọn): Mô hình sinh ảnh. Mặc định `NANO_BANANA_PRO` (hoặc alias `"pro"`). Hỗ trợ `NANO_BANANA_2` (hoặc alias `"banana2"`).
+- `input_images` (array, tuỳ chọn): Danh sách ảnh tham chiếu dạng Base64.
+  - `image_base64` (string): Chuỗi base64 của ảnh.
+  - `mime_type` (string): `image/jpeg` hoặc `image/png`.
+
+#### Ví dụ Text-to-Image:
+```bash
+curl -X POST https://apikit.shopcongngheso5.io.vn/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "A cybernetic samurai standing under cherry blossoms in neon rain, hyper-detailed, 8k",
+    "aspect_ratio": "16:9",
+    "model": "pro"
+  }'
+```
+
+#### Ví dụ Image-to-Image (Có ảnh tham chiếu Base64):
+```bash
+curl -X POST https://apikit.shopcongngheso5.io.vn/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Same samurai looking up at neon skyscrapers, glowing blade in hand",
+    "aspect_ratio": "9:16",
+    "model": "pro",
+    "input_images": [
+      {
+        "image_base64": "<BASE64_STRING_HERE>",
+        "mime_type": "image/jpeg"
+      }
+    ]
+  }'
+```
+
+---
+
+## 4. Sinh Video: Gemini Omni Flash (`POST /v1/videos/generations`)
 
 Tất cả các chế độ sinh video đều sử dụng chung endpoint `POST /v1/videos/generations`.
 Hệ thống **chỉ sử dụng Gemini Omni Flash** (tuyệt đối không dùng Veo) và tự động ánh xạ đúng Google Flow Batch RPC:
@@ -149,7 +200,9 @@ curl -X POST https://apikit.shopcongngheso5.io.vn/v1/videos/generations \
 
 ---
 
-## 4. Tra cứu trạng thái Job (`GET /v1/jobs/{job_id}`)
+---
+
+## 5. Tra cứu trạng thái Job (`GET /v1/jobs/{job_id}` & `POST /v1/jobs/status`)
 
 Khi gửi request tạo video/ảnh thành công, server trả về **HTTP 202 Accepted** kèm `job_id`:
 ```json
@@ -171,9 +224,25 @@ Khi gửi request tạo video/ảnh thành công, server trả về **HTTP 202 A
 }
 ```
 
-Client thực hiện poll trạng thái qua `GET /v1/jobs/{job_id}`:
-- Khi đang xử lý: `"status": "running"`
-- Khi hoàn tất: `"status": "complete"`, `"media"` chứa danh sách file video kèm signed download URL:
+### 5.1. Tra cứu một job:
+```bash
+curl -X GET https://apikit.shopcongngheso5.io.vn/v1/jobs/job_8baa7d8f6a4141ec
+```
+
+### 5.2. Tra cứu nhiều job cùng lúc:
+```bash
+curl -X POST https://apikit.shopcongngheso5.io.vn/v1/jobs/status \
+  -H "Content-Type: application/json" \
+  -d '{"job_ids": ["job_8baa7d8f6a4141ec", "job_12345678abcdef01"]}'
+```
+
+### 5.3. Các trạng thái của Job:
+- `"queued"`: Đang xếp hàng đợi phân bổ tài khoản.
+- `"running"`: Đang được xử lý trên Google Flow.
+- `"complete"`: Xử lý thành công. Trường `media` chứa link tải trực tiếp (`url` signed URL).
+- `"failed"`: Thất bại. Thông tin lỗi chi tiết hiển thị trong object `error`.
+
+Mẫu response khi hoàn tất:
 ```json
 {
   "jobs": [
@@ -198,4 +267,243 @@ Client thực hiện poll trạng thái qua `GET /v1/jobs/{job_id}`:
   }
 }
 ```
-- Khi lỗi: `"status": "failed"`, `"error": "thông báo lỗi chi tiết"`.
+
+---
+
+## 6. Phong cách Mỹ thuật (`GET /v1/materials`)
+
+Lấy danh sách các preset phong cách mỹ thuật ảnh (`realistic`, `3d_pixar`, `anime`, `cyberpunk`, `ghibli`, `comic_book`...). Agent có thể sử dụng các chỉ dẫn phong cách (`style_instruction`, `scene_prefix`, `negative_prompt`) để tự động tối ưu prompt cho người dùng.
+
+```bash
+curl -s https://apikit.shopcongngheso5.io.vn/v1/materials
+```
+
+Chi tiết 1 phong cách:
+```bash
+curl -s https://apikit.shopcongngheso5.io.vn/v1/materials/3d_pixar
+```
+
+---
+
+## 7. Âm thanh AI: Lồng tiếng (TTS) & Nhạc nền (Suno)
+
+### 7.1. Danh sách giọng đọc có sẵn (`GET /v1/audio/voices`)
+```bash
+curl -s https://apikit.shopcongngheso5.io.vn/v1/audio/voices
+```
+
+### 7.2. Sinh giọng đọc thuyết minh (`POST /v1/audio/speech`)
+Nhận văn bản kịch bản và sinh ra file âm thanh MP3/WAV. Server trả về cả `audio_url` và `audio_base64`.
+
+```bash
+curl -X POST https://apikit.shopcongngheso5.io.vn/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{
+    "text": "Neo-Saigon chua bao gio ngu, va toi cung vay.",
+    "voice_id": "narrator_calm",
+    "speed": 1.0,
+    "instruct": "Trầm ấm, điềm tĩnh, phong cách phim trinh thám"
+  }'
+```
+
+Response (HTTP 201):
+```json
+{
+  "id": "tts_8ab9c102ef14",
+  "duration_seconds": 3.2,
+  "audio_url": "https://apikit.shopcongngheso5.io.vn/v1/audio/download/tts_8ab9c102ef14.wav",
+  "audio_base64": "UklGRiQAAABXQVZF..."
+}
+```
+
+### 7.3. Sinh nhạc nền qua Suno (`POST /v1/audio/music`)
+```bash
+curl -X POST https://apikit.shopcongngheso5.io.vn/v1/audio/music \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Cyberpunk synthwave, driving dark beat, atmospheric neon pulse",
+    "style": "synthwave, electronic, cinematic",
+    "title": "Neon Chase",
+    "instrumental": true
+  }'
+```
+
+Tra cứu trạng thái bài nhạc:
+```bash
+curl -s https://apikit.shopcongngheso5.io.vn/v1/audio/music/<TASK_ID>
+```
+
+---
+
+## 8. Biên tập & Ghép nối Video (`POST /v1/videos/concat`)
+
+Nhận danh sách URL các video clip (sinh từ Gemini Omni Flash), kết hợp cùng URL file giọng đọc và nhạc nền để xuất ra 1 file MP4 hoàn chỉnh bằng ffmpeg.
+
+```bash
+curl -X POST https://apikit.shopcongngheso5.io.vn/v1/videos/concat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "video_urls": [
+      "https://flow-content.google/video/clip1.mp4?...",
+      "https://flow-content.google/video/clip2.mp4?..."
+    ],
+    "narration_audio_url": "https://apikit.shopcongngheso5.io.vn/v1/audio/download/tts_8ab9c102ef14.wav",
+    "narration_volume": 1.0,
+    "music_url": "https://cdn.suno.com/music_track.mp3",
+    "music_volume": 0.3
+  }'
+```
+
+Response (HTTP 201):
+```json
+{
+  "id": "concat_91fab82310de",
+  "status": "complete",
+  "video_url": "https://apikit.shopcongngheso5.io.vn/v1/videos/download/concat_91fab82310de.mp4"
+}
+```
+
+---
+
+## 9. Quản lý Thực thể & Nhân vật (`/v1/characters`)
+
+Dành cho Agent muốn lưu trữ profile nhân vật/địa điểm cố định, tái sử dụng xuyên suốt nhiều cảnh phim.
+
+- **Tạo nhân vật:** `POST /v1/characters` (nhận `name`, `description`, `image_prompt`, `input_images` Base64).
+- **Danh sách nhân vật:** `GET /v1/characters`.
+- **Chi tiết nhân vật:** `GET /v1/characters/{id}`.
+- **Cập nhật nhân vật:** `PATCH /v1/characters/{id}`.
+- **Xóa nhân vật:** `DELETE /v1/characters/{id}`.
+
+---
+
+## 10. Code mẫu tích hợp (SDK / Scripts)
+
+### Python (Sử dụng `requests`)
+
+```python
+import base64
+import time
+import requests
+
+BASE_URL = "https://apikit.shopcongngheso5.io.vn"
+
+def encode_image(image_path: str) -> str:
+    with open(image_path, "rb") as f:
+        return base64.b64encode(f.read()).decode("utf-8")
+
+def generate_video_from_first_frame(image_path: str, prompt: str) -> str:
+    # 1. Chuẩn bị payload với ảnh Base64
+    payload = {
+        "prompt": prompt,
+        "duration_seconds": 4,
+        "aspect_ratio": "9:16",
+        "model": "omni_flash",
+        "input_images": [
+            {
+                "image_base64": encode_image(image_path),
+                "mime_type": "image/jpeg",
+                "role": "start_frame"
+            }
+        ]
+    }
+
+    # 2. Gửi request tạo tác vụ
+    res = requests.post(f"{BASE_URL}/v1/videos/generations", json=payload)
+    res.raise_for_status()
+    data = res.json()
+    job_id = data["jobs"][0]["id"]
+    print(f"[*] Job created: {job_id}. Polling for result...")
+
+    # 3. Poll trạng thái cho đến khi hoàn thành
+    while True:
+        status_res = requests.get(f"{BASE_URL}/v1/jobs/{job_id}")
+        status_res.raise_for_status()
+        job = status_res.json()["jobs"][0]
+        status = job["status"]
+
+        if status == "complete":
+            video_url = job["media"][0]["url"]
+            print(f"[+] Hoàn thành! URL video: {video_url}")
+            return video_url
+        elif status == "failed":
+            error_msg = job.get("error", {}).get("message", "Unknown error")
+            raise RuntimeError(f"[-] Job thất bại: {error_msg}")
+
+        print(f"[*] Trạng thái: {status}... chờ 10s")
+        time.sleep(10)
+
+if __name__ == "__main__":
+    generate_video_from_first_frame("start.jpg", "A cinematic camera pans over a futuristic city")
+```
+
+### Node.js / TypeScript (Sử dụng `fetch`)
+
+```typescript
+import * as fs from "fs";
+
+const BASE_URL = "https://apikit.shopcongngheso5.io.vn";
+
+async function generateOmniVideo(imagePath: string, prompt: string): Promise<string> {
+  const imageBase64 = fs.readFileSync(imagePath, { encoding: "base64" });
+
+  // 1. Gửi request tạo tác vụ
+  const res = await fetch(`${BASE_URL}/v1/videos/generations`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      prompt,
+      duration_seconds: 4,
+      aspect_ratio: "9:16",
+      model: "omni_flash",
+      input_images: [
+        {
+          image_base64: imageBase64,
+          mime_type: "image/jpeg",
+          role: "start_frame"
+        }
+      ]
+    })
+  });
+
+  if (!res.ok) {
+    throw new Error(`API Error: ${res.statusText} (${res.status})`);
+  }
+
+  const data = await res.json();
+  const jobId = data.jobs[0].id;
+  console.log(`Job queued: ${jobId}. Polling...`);
+
+  // 2. Poll kết quả
+  while (true) {
+    await new Promise((r) => setTimeout(r, 10000));
+    const pollRes = await fetch(`${BASE_URL}/v1/jobs/${jobId}`);
+    const pollData = await pollRes.json();
+    const job = pollData.jobs[0];
+
+    if (job.status === "complete") {
+      console.log("Success! Video URL:", job.media[0].url);
+      return job.media[0].url;
+    } else if (job.status === "failed") {
+      throw new Error(`Generation failed: ${JSON.stringify(job.error)}`);
+    }
+    console.log(`Current status: ${job.status}...`);
+  }
+}
+```
+
+---
+
+## 11. Các lưu ý kỹ thuật quan trọng cho bên tích hợp
+
+1. **Gửi ảnh trực tiếp dạng Base64:**
+   - Client V1 **không cần endpoint upload**. Truyền trực tiếp chuỗi Base64 qua trường `image_base64`.
+   - **Tuyệt đối không truyền `media_id`** (UUID nội bộ của Google Flow). Nếu truyền direct media IDs, API sẽ trả về lỗi `HTTP 422 Unprocessable Entity`.
+2. **Cơ chế Bất đồng bộ (Async Job):**
+   - API trả về HTTP `202 Accepted` ngay lập tức kèm `job_id`.
+   - Thời gian sinh video Omni Flash thường mất từ **60 giây đến 180 giây**. Khuyến nghị poll mỗi **10 giây**.
+3. **Mô hình Video:**
+   - Chỉ hỗ trợ model `"omni_flash"`. Tuyệt đối không dùng Veo qua Client V1.
+4. **Mã lỗi thường gặp:**
+   - `422 Unprocessable Entity`: Sai định dạng tham số (ví dụ: truyền `media_id` trực tiếp, tỉ lệ không hợp lệ, hoặc model không phải `omni_flash`).
+   - `503 Service Unavailable`: Hệ thống đang bảo trì hoặc tài khoản backend quá tải/mất kết nối extension. Kiểm tra trước qua `GET /v1/health`.

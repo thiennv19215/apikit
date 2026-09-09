@@ -67,7 +67,9 @@ class UpscaleVideoRequest(BaseModel):
 
 
 class UploadImageRequest(BaseModel):
-    file_path: str  # absolute path to local image file
+    file_path: Optional[str] = None  # absolute path to local image file on FlowKit server
+    image_base64: Optional[str] = None  # base64 encoded image string (allows remote server uploads)
+    mime_type: Optional[str] = None
     project_id: str = ""
     file_name: str = "image.png"
 
@@ -366,20 +368,51 @@ async def edit_image(body: EditImageRequest):
 
 @router.post("/upload-image")
 async def upload_image(body: UploadImageRequest):
-    """Upload a local image file to Google Flow and get a media_id."""
-    import base64, mimetypes
+    """Upload a local image file or base64 image to Google Flow and get a media_id."""
+    import base64, mimetypes, re
+    from pathlib import Path
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
-    try:
-        with open(body.file_path, "rb") as f:
-            image_bytes = f.read()
-    except FileNotFoundError:
-        raise HTTPException(404, f"File not found: {body.file_path}")
-    b64 = base64.b64encode(image_bytes).decode()
-    mime = mimetypes.guess_type(body.file_path)[0] or "image/png"
-    result = await client.upload_image(b64, mime_type=mime, project_id=body.project_id, file_name=body.file_name)
+
+    if not body.file_path and not body.image_base64:
+        raise HTTPException(400, "Either file_path or image_base64 must be provided")
+
+    b64 = None
+    mime = body.mime_type
+    file_name = body.file_name or "image.png"
+
+    if body.image_base64:
+        raw_b64 = body.image_base64.strip()
+        if raw_b64.startswith("data:"):
+            match = re.match(r"^data:([^;]+);base64,(.+)$", raw_b64, re.DOTALL)
+            if match:
+                if not mime:
+                    mime = match.group(1).strip()
+                b64 = match.group(2).strip()
+            else:
+                parts = raw_b64.split(",", 1)
+                b64 = parts[1].strip() if len(parts) > 1 else raw_b64
+        else:
+            b64 = raw_b64
+        if not mime:
+            mime = "image/png"
+    elif body.file_path:
+        try:
+            with open(body.file_path, "rb") as f:
+                image_bytes = f.read()
+        except FileNotFoundError:
+            raise HTTPException(404, f"File not found: {body.file_path}")
+        b64 = base64.b64encode(image_bytes).decode("utf-8")
+        if not mime:
+            mime = mimetypes.guess_type(body.file_path)[0] or "image/png"
+        if body.file_name == "image.png":
+            name = Path(body.file_path).name
+            if name:
+                file_name = name
+
+    result = await client.upload_image(b64, mime_type=mime, project_id=body.project_id, file_name=file_name)
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
         raise HTTPException(result.get("status", 502), result.get("error", result.get("data")))
-    media_id = result.get("_mediaId")
+    media_id = result.get("_mediaId") or result.get("data", {}).get("media", {}).get("name")
     return {"media_id": media_id, "raw": result.get("data", result)}
