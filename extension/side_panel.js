@@ -73,11 +73,28 @@ function updateStatus(data) {
   toggle.checked = isOn;
   toggleLabel.textContent = isOn ? 'ON' : 'OFF';
 
+  // Tab badge
+  const tabBadge = document.getElementById('flow-tab-badge');
+  if (tabBadge) {
+    if (data.hasFlowTab) {
+      tabBadge.textContent = 'flow tab ok';
+      tabBadge.className = 'ok';
+    } else {
+      tabBadge.textContent = 'no flow tab';
+      tabBadge.className = 'bad';
+    }
+  }
+
   // State badge
   const stateBadge = document.getElementById('state-badge');
   const st = data.state || 'off';
-  stateBadge.textContent = st;
-  stateBadge.className = st; // idle | running | off
+  if (st === 'idle' && !data.hasFlowTab && data.agentConnected) {
+    stateBadge.textContent = 'NO TAB';
+    stateBadge.className = 'warn';
+  } else {
+    stateBadge.textContent = st;
+    stateBadge.className = st; // idle | running | off
+  }
 
   // Token status
   const tokenEl = document.getElementById('token-status');
@@ -143,8 +160,10 @@ function updateRequestLog(entries) {
       badgeHtml = '<span class="badge badge-proc">&#9203; sent</span>';
     }
 
+    const isNoTab = error === 'No current window' || error === 'NO_FLOW_TAB';
+    const displayErr = isNoTab ? 'No Flow tab open' : error;
     const errorDisplay = error
-      ? `<td class="td-error" title="${escHtml(error)}">${escHtml(truncate(error, 28))}</td>`
+      ? `<td class="td-error" title="${escHtml(displayErr)}">${escHtml(truncate(displayErr, 28))}</td>`
       : `<td class="td-error empty">—</td>`;
 
     return `<tr>

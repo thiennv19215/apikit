@@ -12,7 +12,7 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-from agent.config import API_HOST, API_PORT, WS_HOST, WS_PORT, BASE_DIR
+from agent.config import API_HOST, API_PORT, WS_HOST, WS_PORT, BASE_DIR, USE_BATCH_RPC
 from agent.db.schema import init_db, close_db
 from agent.api.characters import router as characters_router
 from agent.api.projects import router as projects_router
@@ -262,10 +262,12 @@ async def get_captured_payloads(limit: int = 10):
 @app.get("/health")
 async def health():
     client = get_flow_client()
+    has_flow_tab = getattr(client, "has_flow_tab", True)
     return {
         "status": "ok",
         "version": "0.2.0",
         "extension_connected": client.connected,
+        "has_flow_tab": has_flow_tab,
         "ws": client.ws_stats,
     }
 
@@ -277,14 +279,21 @@ def _get_provider_status_dict():
     extensions = client.list_extensions()
     active_accounts = len(extensions)
     available_accounts = sum(bool(ext["available"]) for ext in extensions)
+    has_flow_tab = getattr(client, "has_flow_tab", True) if USE_BATCH_RPC else True
     controller = get_worker_controller()
     active_count = controller.active_count if controller else 0
     capacity = 200
-    status_str = "ready" if connected and available_accounts else "waiting_for_provider"
+    if connected and available_accounts and has_flow_tab:
+        status_str = "ready"
+    elif connected and not has_flow_tab:
+        status_str = "waiting_for_flow_tab"
+    else:
+        status_str = "waiting_for_provider"
     return {
         "status": status_str,
         "project_store": "ready",
         "provider_accounts": active_accounts,
+        "has_flow_tab": has_flow_tab,
         "video_lite_ready_accounts": available_accounts,
         "jobs": {"queued": 0, "dispatching": active_count, "running": active_count},
         "active_jobs": active_count,

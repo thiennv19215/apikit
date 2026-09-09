@@ -61,10 +61,17 @@ const chrome = {
   },
   tabs: {
     create: async () => ({}),
+    onCreated: event(),
+    onRemoved: event(),
     onUpdated: event(),
     query: async () => [],
     sendMessage: async () => {},
     update: async () => {},
+  },
+  windows: {
+    getAll: async () => [],
+    create: async () => ({}),
+    update: async () => ({}),
   },
   webRequest: {
     onBeforeSendHeaders: event(),
@@ -107,6 +114,7 @@ setImmediate(async () => {
 
   assert.equal(socket.messages[0].type, 'extension_ready');
   assert.equal(socket.messages[0].flowKeyPresent, true);
+  assert.equal(socket.messages[0].hasFlowTab, false);
   assert.ok(socket.messages[0].tokenAge > 0);
   assert.deepEqual(socket.messages[1], {
     type: 'token_captured',

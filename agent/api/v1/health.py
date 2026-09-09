@@ -49,10 +49,17 @@ async def client_health(response: Response):
         async with db.execute("SELECT 1") as cursor:
             await cursor.fetchone()
         client = get_flow_client()
+        extensions = client.list_extensions()
         provider_ready = client.connected and any(
-            item.get("available") for item in client.list_extensions()
+            item.get("available") and item.get("has_flow_tab") is not False
+            for item in extensions
         )
-        reason = None if provider_ready else "PROVIDER_UNAVAILABLE"
+        if provider_ready:
+            reason = None
+        elif client.connected and any(item.get("available") for item in extensions):
+            reason = "NO_FLOW_TAB"
+        else:
+            reason = "PROVIDER_UNAVAILABLE"
     except Exception:
         provider_ready = False
         reason = "BACKEND_UNAVAILABLE"

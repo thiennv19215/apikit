@@ -23,6 +23,7 @@ from agent.config import (
     API_COOLDOWN,
     MAX_CONCURRENT_REQUESTS,
     CLIENT_V1_QUEUE_TIMEOUT,
+    USE_BATCH_RPC,
 )
 from agent.worker._parsing import _is_error
 from agent.sdk.services.result_handler import parse_result, apply_scene_result, apply_character_result
@@ -146,6 +147,10 @@ class WorkerController:
             try:
                 if not client.connected:
                     await self._expire_unserviceable_pending_requests()
+                    await asyncio.sleep(POLL_INTERVAL)
+                    continue
+
+                if USE_BATCH_RPC and client._extensions and all(sess.get("has_flow_tab") is False for sess in client._extensions.values()):
                     await asyncio.sleep(POLL_INTERVAL)
                     continue
 

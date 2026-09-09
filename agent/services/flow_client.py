@@ -143,6 +143,7 @@ class FlowClient:
                 "flow_project_id": session.get("flow_project_id"),
                 "in_flight": session.get("in_flight", 0),
                 "available": session.get("unavailable_until", 0) <= now,
+                "has_flow_tab": session.get("has_flow_tab"),
                 "connected_at": session.get("connected_at"),
                 "credits": session.get("credits"),
                 "tier": session.get("tier"),
@@ -150,6 +151,7 @@ class FlowClient:
         return result
 
     def _extension_candidates(self, require_token: bool,
+                              require_flow_tab: bool = False,
                               preferred_installation: str | None = None,
                               preferred_project_id: str | None = None):
         """Return usable extensions in preferred routing order with load balancing."""
@@ -157,6 +159,8 @@ class FlowClient:
         candidates = []
         for ws, session in self._extensions.items():
             if require_token and not session.get("flow_key"):
+                continue
+            if require_flow_tab and session.get("has_flow_tab") is False:
                 continue
             recency = (
                 session.get("token_captured_at")
@@ -253,6 +257,17 @@ class FlowClient:
         return bool(self._extensions)
 
     @property
+    def has_flow_tab(self) -> bool:
+        """Return True if at least one connected extension has an open Flow tab."""
+        if not self._extensions:
+            return False
+        # If any extension explicitly reports has_flow_tab True:
+        if any(sess.get("has_flow_tab") is True for sess in self._extensions.values()):
+            return True
+        # If none report True, check if any is legacy (None - not reported):
+        return any(sess.get("has_flow_tab") is None for sess in self._extensions.values())
+
+    @property
     def ws_stats(self) -> dict:
         uptime = None
         if self._ws_connected_at and self.connected:
@@ -290,17 +305,36 @@ class FlowClient:
                 sess = self._extensions[source_ws]
                 sess["installation_id"] = data.get("installationId")
                 sess["profile_name"] = data.get("profileName")
+                sess["has_flow_tab"] = bool(data.get("hasFlowTab", False)) if "hasFlowTab" in data else None
                 if data.get("profileName") and "@" in str(data.get("profileName")):
                     sess["account_email"] = data.get("profileName")
                 if data.get("flowProjectId"):
                     sess["flow_project_id"] = data.get("flowProjectId")
             logger.info(
-                "Extension ready: installation=%s profile=%s flowKey=%s",
+                "Extension ready: installation=%s profile=%s flowKey=%s hasFlowTab=%s",
                 data.get("installationId"),
                 data.get("profileName"),
                 "yes" if data.get("flowKeyPresent") else "no",
+                "yes" if data.get("hasFlowTab") else "no",
             )
             asyncio.create_task(self._sync_tier())
+            return
+
+        if data.get("type") == "flow_tab_status":
+            source_ws = websocket or self._extension_ws
+            if source_ws is not None and source_ws in self._extensions:
+                sess = self._extensions[source_ws]
+                sess["has_flow_tab"] = bool(data.get("hasFlowTab", False))
+                if data.get("flowProjectId"):
+                    sess["flow_project_id"] = data.get("flowProjectId")
+                elif not data.get("hasFlowTab"):
+                    sess["flow_project_id"] = None
+                logger.info(
+                    "Flow tab status updated for installation=%s profile=%s: hasFlowTab=%s",
+                    sess.get("installation_id"),
+                    sess.get("profile_name"),
+                    "yes" if sess.get("has_flow_tab") else "no",
+                )
             return
 
         if data.get("type") == "flow_project_id_updated":
@@ -498,8 +532,10 @@ class FlowClient:
             return {"error": "Extension not connected"}
 
         needs_token = not USE_BATCH_RPC
+        needs_flow_tab = USE_BATCH_RPC and method == "batch_rpc"
         extension_candidates = self._extension_candidates(
             require_token=needs_token,
+            require_flow_tab=needs_flow_tab,
             preferred_installation=preferred_installation,
             preferred_project_id=preferred_project_id,
         )
@@ -513,6 +549,8 @@ class FlowClient:
         if not extension_candidates and needs_token:
             return {"error": "NO_FLOW_KEY"}
         if not extension_candidates:
+            if USE_BATCH_RPC and method == "batch_rpc" and self._extensions and all(sess.get("has_flow_tab") is False for sess in self._extensions.values()):
+                return {"error": "NO_FLOW_TAB: No open Google Flow tab found in Chrome. Please open flow.google.com."}
             return {"error": "Extension not connected: no available profile (cooldown)"}
 
         last_result = {"error": "Extension not connected"}

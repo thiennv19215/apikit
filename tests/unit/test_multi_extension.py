@@ -210,6 +210,49 @@ class TestMultiExtensionPool:
         assert res.get("data") == "succeeded_on_failover"
         assert res.get("_installation_id") == "b"
 
+    @pytest.mark.asyncio
+    async def test_has_flow_tab_tracking_and_candidate_filtering(self, multi_client):
+        ws_a = FakeWebSocket("ws_a")
+        ws_b = FakeWebSocket("ws_b")
+        multi_client.set_extension(ws_a)
+        multi_client.set_extension(ws_b)
+
+        # ws_a has no Flow tab, ws_b has Flow tab
+        await multi_client.handle_message({
+            "type": "extension_ready",
+            "installationId": "a",
+            "hasFlowTab": False,
+        }, ws_a)
+        await multi_client.handle_message({
+            "type": "extension_ready",
+            "installationId": "b",
+            "hasFlowTab": True,
+        }, ws_b)
+
+        assert multi_client.has_flow_tab is True
+        ext_list = multi_client.list_extensions()
+        ext_map = {e["installation_id"]: e for e in ext_list}
+        assert ext_map["a"]["has_flow_tab"] is False
+        assert ext_map["b"]["has_flow_tab"] is True
+
+        # When requiring flow tab, only ws_b is a candidate
+        candidates = multi_client._extension_candidates(require_token=False, require_flow_tab=True)
+        assert candidates == [ws_b]
+
+        # ws_b closes its tab and sends flow_tab_status event
+        await multi_client.handle_message({
+            "type": "flow_tab_status",
+            "hasFlowTab": False,
+        }, ws_b)
+        assert multi_client.has_flow_tab is False
+        candidates_none = multi_client._extension_candidates(require_token=False, require_flow_tab=True)
+        assert candidates_none == []
+
+        # Batch RPC call without flow tab should fail fast with NO_FLOW_TAB
+        res = await multi_client._send("batch_rpc", {"action": "generate_media"}, timeout=2)
+        assert "error" in res
+        assert "NO_FLOW_TAB" in res["error"]
+
 
 class TestConcurrentRateLimiter:
     @pytest.mark.asyncio

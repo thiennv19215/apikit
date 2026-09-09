@@ -94,10 +94,12 @@ function renderLog(entries) {
          </div>`
       : '';
 
+    const isNoTab = error === 'No current window' || error === 'NO_FLOW_TAB';
+    const displayErr = isNoTab ? 'No Flow tab open' : error;
     const errorDisplay = error
       ? `<div class="detail-section">
            <div class="detail-label">Error</div>
-           <div class="detail-value detail-error">${escHtml(error)}</div>
+           <div class="detail-value detail-error">${escHtml(displayErr)}</div>
          </div>`
       : '';
 

@@ -197,6 +197,46 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
   ['requestHeaders', 'extraHeaders'],
 );
 
+/** Safely create a tab inside an existing browser window.
+ *  Prevents Chrome runtime error "No current window" when service worker runs without a focused window. */
+async function safeCreateTab(url, active = false) {
+  try {
+    if (chrome.windows?.getAll) {
+      const windows = await chrome.windows.getAll({ windowTypes: ['normal'] });
+      if (windows && windows.length > 0) {
+        const win = windows.find((w) => w.focused) || windows[windows.length - 1];
+        return await chrome.tabs.create({ windowId: win.id, url, active });
+      }
+    }
+    return null;
+  } catch (e) {
+    console.warn('[FlowAgent] safeCreateTab failed:', e?.message);
+    return null;
+  }
+}
+
+/** Get an existing Flow tab or safely open one if requested and possible. */
+async function openOrGetFlowTab({ createIfMissing = false } = {}) {
+  try {
+    const tabs = await chrome.tabs.query({ url: flowUrls });
+    let candidate = tabs.find((t) => !t.discarded) || tabs[0];
+    if (candidate) {
+      return await reviveTabIfNeeded(candidate);
+    }
+    if (!createIfMissing) return null;
+
+    const tab = await safeCreateTab(FLOW_TAB_URL, false);
+    if (!tab) return null;
+    await sleep(4000);
+    const fresh = await chrome.tabs.query({ url: flowUrls });
+    candidate = fresh.find((t) => !t.discarded) || fresh[0] || tab;
+    return candidate ? await reviveTabIfNeeded(candidate) : null;
+  } catch (e) {
+    console.warn('[FlowAgent] openOrGetFlowTab failed:', e?.message);
+    return null;
+  }
+}
+
 let _openingFlowTab = false;
 
 async function captureTokenFromFlowTab() {
@@ -209,7 +249,11 @@ async function captureTokenFromFlowTab() {
     _openingFlowTab = true;
     try {
       console.log('[FlowAgent] No Flow tab found — opening one in background');
-      await chrome.tabs.create({ url: FLOW_TAB_URL, active: false });
+      const created = await safeCreateTab(FLOW_TAB_URL, false);
+      if (!created) {
+        console.log('[FlowAgent] No browser window available to open Flow tab');
+        return;
+      }
       await sleep(3000);
       const retryTabs = await chrome.tabs.query({ url: flowUrls });
       if (!retryTabs.length) {
@@ -336,9 +380,45 @@ async function detectFlowProjectId() {
   return flowProjectId;
 }
 
+let _lastFlowTabState = null;
+
+async function notifyFlowTabStatus(force = false) {
+  try {
+    const tabs = await chrome.tabs.query({ url: flowUrls });
+    const hasFlowTab = tabs.length > 0;
+    if (force || hasFlowTab !== _lastFlowTabState) {
+      _lastFlowTabState = hasFlowTab;
+      await chrome.storage.local.set({ hasFlowTab });
+      if (hasFlowTab) {
+        await detectFlowProjectId();
+      }
+      if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: 'flow_tab_status',
+          hasFlowTab,
+          flowProjectId: hasFlowTab ? flowProjectId : null,
+        }));
+      }
+    }
+  } catch (e) {
+    console.warn('[FlowAgent] notifyFlowTabStatus error:', e);
+  }
+}
+
+chrome.tabs.onCreated?.addListener(() => {
+  void notifyFlowTabStatus();
+});
+
+chrome.tabs.onRemoved?.addListener(() => {
+  setTimeout(() => void notifyFlowTabStatus(), 500);
+});
+
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.url && (changeInfo.url.includes('flow.google.com') || changeInfo.url.includes('labs.google'))) {
     void detectFlowProjectId();
+  }
+  if (changeInfo.url || changeInfo.status === 'complete') {
+    void notifyFlowTabStatus();
   }
 });
 
@@ -363,8 +443,16 @@ function connectToAgent() {
     chrome.alarms.clear('reconnect');
     setState('idle');
 
-    // Auto-detect project ID on connect
-    await detectFlowProjectId();
+    // Check if Flow tab actually exists right now
+    const tabs = await chrome.tabs.query({ url: flowUrls });
+    const hasFlowTab = tabs.length > 0;
+    _lastFlowTabState = hasFlowTab;
+    await chrome.storage.local.set({ hasFlowTab });
+
+    // Auto-detect project ID on connect (only if tab exists)
+    if (hasFlowTab) {
+      await detectFlowProjectId();
+    }
 
     // Token refresh alarm — 45 min gives buffer before ~60 min expiry
     chrome.alarms.create('token-refresh', { periodInMinutes: 45 });
@@ -376,7 +464,8 @@ function connectToAgent() {
       profileName,
       protocolVersion: 2,
       flowKeyPresent: !!flowKey,
-      flowProjectId,
+      flowProjectId: hasFlowTab ? flowProjectId : null,
+      hasFlowTab,
       tokenAge: flowKey && metrics.tokenCapturedAt ? Date.now() - metrics.tokenCapturedAt : null,
     }));
     if (flowKey) {
@@ -582,15 +671,11 @@ function captchaFromTab(tabId, requestId, captchaAction) {
 async function solveCaptcha(requestId, captchaAction) {
   let tabs = await chrome.tabs.query({ url: flowUrls });
 
-  // No Flow tab at all — spawn one and let it settle.
+  // No Flow tab at all — try to spawn one if a browser window exists.
   if (!tabs.length) {
-    try {
-      await chrome.tabs.create({ url: FLOW_TAB_URL, active: false });
-      await sleep(3000);
-      tabs = await chrome.tabs.query({ url: flowUrls });
-    } catch (e) {
-      return { error: e.message || 'NO_FLOW_TAB' };
-    }
+    const freshTab = await openOrGetFlowTab({ createIfMissing: true });
+    if (!freshTab) return { error: 'NO_FLOW_TAB' };
+    tabs = await chrome.tabs.query({ url: flowUrls });
     if (!tabs.length) return { error: 'NO_FLOW_TAB' };
   }
 
@@ -624,16 +709,14 @@ async function solveCaptcha(requestId, captchaAction) {
     }
   }
 
-  // Every candidate failed — last-ditch, spawn a fresh tab and try it once.
+  // Every candidate failed — last-ditch, try to open/revive fresh tab once.
   try {
-    await chrome.tabs.create({ url: FLOW_TAB_URL, active: false });
-    await sleep(3000);
-    const fresh = await chrome.tabs.query({ url: flowUrls });
-    const target = fresh.find((t) => !t.discarded) || fresh[0];
+    const target = await openOrGetFlowTab({ createIfMissing: true });
     if (!target) return { error: 'NO_FLOW_TAB' };
     return await captchaFromTab(target.id, requestId, captchaAction);
   } catch (e) {
-    return { error: e?.message || errors[0] || 'NO_FLOW_TAB' };
+    const msg = e?.message || errors[0] || 'NO_FLOW_TAB';
+    return { error: msg.includes('No current window') ? 'NO_FLOW_TAB' : msg };
   }
 }
 
@@ -669,24 +752,10 @@ async function runBatchRpc(cmd) {
   if (!flowProjectId) {
     await detectFlowProjectId();
   }
-  const tabs = await chrome.tabs.query({ url: flowUrls });
-  let candidate = tabs.find((t) => !t.discarded) || tabs[0];
-  if (!candidate) {
-    // No Flow tab — open one and give the app a moment to boot, otherwise
-    // WIZ_global_data is not on the page yet and `at` comes back empty.
-    try {
-      await chrome.tabs.create({ url: FLOW_TAB_URL, active: false });
-      await sleep(5000);
-      const fresh = await chrome.tabs.query({ url: flowUrls });
-      candidate = fresh.find((t) => !t.discarded) || fresh[0];
-    } catch (e) {
-      return { error: e?.message || 'NO_FLOW_TAB' };
-    }
-    if (!candidate) return { error: 'NO_FLOW_TAB' };
+  const tab = await openOrGetFlowTab({ createIfMissing: true });
+  if (!tab) {
+    return { error: 'NO_FLOW_TAB' };
   }
-  // Chrome discards backgrounded tabs; executeScript throws on a dead one.
-  const tab = await reviveTabIfNeeded(candidate);
-  if (!tab) return { error: 'FLOW_TAB_DISCARDED' };
 
   let freq = cmd.freq;
   if (cmd.captchaAction) {
@@ -986,6 +1055,7 @@ chrome.runtime.onMessage.addListener((msg, _, reply) => {
       agentWsUrl,
       flowProjectId,
       flowKeyPresent: !!flowKey,
+      hasFlowTab: !!_lastFlowTabState,
       manualDisconnect,
       tokenAge: metrics.tokenCapturedAt ? Date.now() - metrics.tokenCapturedAt : null,
       metrics: {
@@ -1048,14 +1118,24 @@ chrome.runtime.onMessage.addListener((msg, _, reply) => {
   }
 
   if (msg.type === 'OPEN_FLOW_TAB') {
-    chrome.tabs.query({ url: flowUrls }).then((tabs) => {
+    chrome.tabs.query({ url: flowUrls }).then(async (tabs) => {
       if (tabs.length) {
         chrome.tabs.update(tabs[0].id, { active: true });
+        if (tabs[0].windowId && chrome.windows?.update) {
+          chrome.windows.update(tabs[0].windowId, { focused: true }).catch(() => {});
+        }
         reply({ ok: true, tabId: tabs[0].id });
       } else {
-        chrome.tabs.create({ url: FLOW_TAB_URL })
-          .then((tab) => reply({ ok: true, tabId: tab.id }))
-          .catch((e) => reply({ error: e.message }));
+        const created = await safeCreateTab(FLOW_TAB_URL, true);
+        if (created) {
+          reply({ ok: true, tabId: created.id });
+        } else if (chrome.windows?.create) {
+          chrome.windows.create({ url: FLOW_TAB_URL })
+            .then((win) => reply({ ok: true, windowId: win.id }))
+            .catch((e) => reply({ error: e.message }));
+        } else {
+          reply({ error: 'NO_WINDOW' });
+        }
       }
     }).catch((e) => reply({ error: e.message }));
     return true;

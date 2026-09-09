@@ -191,7 +191,19 @@
 
     #state-badge.idle    { background: rgba(34,197,94,0.15);  color: var(--green); }
     #state-badge.running { background: rgba(245,158,11,0.15); color: var(--yellow); }
+    #state-badge.warn    { background: rgba(245,158,11,0.15); color: var(--yellow); }
     #state-badge.off     { background: var(--border);         color: var(--muted); }
+
+    #flow-tab-badge {
+      padding: 1px 7px;
+      border-radius: 3px;
+      font-size: 9px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    #flow-tab-badge.ok   { background: rgba(34,197,94,0.15);  color: var(--green); }
+    #flow-tab-badge.bad  { background: rgba(239,68,68,0.15);  color: var(--red); }
 
     #token-status {
       margin-left: auto;
@@ -523,6 +535,7 @@
   <div class="state-bar">
     STATE
     <span id="state-badge" class="off">off</span>
+    <span id="flow-tab-badge" class="bad">no flow tab</span>
     <span id="token-status" class="bad">no token</span>
   </div>
 
