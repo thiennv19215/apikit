@@ -80,6 +80,35 @@ def base_scene():
 
 
 # ---------------------------------------------------------------------------
+# Test: non-blocking video submission
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_scene_video_submit_can_return_operation_without_polling(service, base_scene, mock_client):
+    """Queue workers free their submit slot once Flow accepts a video job."""
+    mock_client.generate_video = AsyncMock(return_value={
+        "status": 200,
+        "data": {"operations": [{
+            "operation": {"name": "operations/video-123"},
+            "status": "MEDIA_GENERATION_STATUS_PENDING",
+        }]},
+    })
+
+    with patch("agent.sdk.services.operations.crud") as mock_crud:
+        mock_crud.get_project = AsyncMock(return_value={"user_paygate_tier": "PAYGATE_TIER_TWO"})
+        mock_crud.get_request = AsyncMock(return_value={"request_id": None})
+        mock_crud.update_request = AsyncMock()
+
+        result = await service.generate_scene_video(
+            base_scene, "VERTICAL", request_id="job-123", poll=False,
+        )
+
+    assert result["_async_operation"] is True
+    assert result["operations"][0]["operation"]["name"] == "operations/video-123"
+    mock_client.check_video_status.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # Test: generate_scene_image
 # ---------------------------------------------------------------------------
 

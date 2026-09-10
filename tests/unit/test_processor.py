@@ -1,9 +1,13 @@
 """Unit tests for agent/worker/processor.py — heavy mocking of crud, flow_client, operations."""
 
+import asyncio
+import time
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from agent.worker.processor import (
+    WorkerController,
     _is_already_completed,
     _mark_scene_failed,
     _handle_failure,
@@ -31,6 +35,23 @@ def make_req(
         "project_id": "proj-001",
         "video_id": "video-001",
     }
+
+
+# ---------------------------------------------------------------------------
+# Worker wake-up
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_worker_wakes_immediately_when_new_work_is_queued():
+    controller = WorkerController()
+    waiter = asyncio.create_task(controller._wait_for_work())
+    await asyncio.sleep(0)
+
+    started = time.monotonic()
+    controller.notify_work_available()
+    await asyncio.wait_for(waiter, timeout=0.2)
+
+    assert time.monotonic() - started < 0.2
 
 
 # ---------------------------------------------------------------------------

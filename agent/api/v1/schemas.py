@@ -192,6 +192,9 @@ class JobError(BaseModel):
 
 class Job(BaseModel):
     id: str
+    # Flow's provider-side handle. It is absent while this job is still in the
+    # local queue, and becomes available after the worker has submitted it.
+    operation_id: str | None = None
     project_id: str | None = None
     routing_scope: str | None = None
     provider: str = "google_flow"
@@ -218,6 +221,7 @@ class JobsResponse(BaseModel):
 
     # Convenience and backward-compatibility fields:
     job_id: str | None = None
+    operation_id: str | None = None
     type: str | None = None
     generation_type: str | None = None
     status: str | None = None

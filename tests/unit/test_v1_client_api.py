@@ -157,6 +157,33 @@ async def test_video_generation_endpoint_and_status():
 
 
 @pytest.mark.asyncio
+async def test_video_job_exposes_flow_operation_id_after_submission():
+    """The client polls the local job ID, while Flow's handle is observable."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        submitted = await ac.post("/v1/videos/generations", json={
+            "prompt": "A fox runs through a forest",
+            "input_images": [{"image_base64": "aGVsbG8=", "mime_type": "image/jpeg"}],
+        })
+        assert submitted.status_code == 202
+        job_id = submitted.json()["job_id"]
+        assert submitted.json()["operation_id"] is None
+
+        await crud.update_request(
+            job_id,
+            status="PROCESSING",
+            request_id="operations/flow-video-1234",
+        )
+
+        polled = await ac.get(f"/v1/jobs/{job_id}")
+        assert polled.status_code == 200
+        body = polled.json()
+        assert body["status"] == "running"
+        assert body["operation_id"] == "operations/flow-video-1234"
+        assert body["jobs"][0]["operation_id"] == "operations/flow-video-1234"
+
+
+@pytest.mark.asyncio
 async def test_v1_omni_r2v_base64_uses_selected_profile_and_persists_workflow(monkeypatch):
     """Regression: an installation-scoped R2V job must not use `client` before assignment."""
     transport = ASGITransport(app=app)
@@ -429,6 +456,20 @@ async def test_v1_videos_generations_batch():
         assert j1["status"] == "queued"
         assert j2["type"] == "video"
         assert j2["status"] == "queued"
+
+        # Each batch job gets its own Flow operation ID after submission.
+        await crud.update_request(j1["id"], status="PROCESSING", request_id="operations/flow-video-1")
+        await crud.update_request(j2["id"], status="PROCESSING", request_id="operations/flow-video-2")
+
+        poll_resp = await ac.post("/v1/jobs/status", json={"job_ids": [j1["id"], j2["id"]]})
+        assert poll_resp.status_code == 200
+        poll_data = poll_resp.json()
+        assert [job["operation_id"] for job in poll_data["jobs"]] == [
+            "operations/flow-video-1",
+            "operations/flow-video-2",
+        ]
+        # Top-level convenience fields deliberately mirror the first job.
+        assert poll_data["operation_id"] == "operations/flow-video-1"
 
 
 @pytest.mark.asyncio

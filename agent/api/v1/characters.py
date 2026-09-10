@@ -175,6 +175,8 @@ async def generate_character_image(character_id: str, body: CharacterImageGenera
         )
         await db.commit()
 
+    from agent.worker.processor import get_worker_controller
+    get_worker_controller().notify_work_available()
     return await _resolve_jobs_response([job_id])
 
 
@@ -216,6 +218,8 @@ async def generate_character_video(character_id: str, body: CharacterVideoGenera
         )
         await db.commit()
 
+    from agent.worker.processor import get_worker_controller
+    get_worker_controller().notify_work_available()
     return await _resolve_jobs_response([job_id])
 
 

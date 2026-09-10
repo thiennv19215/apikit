@@ -453,8 +453,8 @@ class OperationService:
     # ------------------------------------------------------------------
 
     async def generate_scene_video(self, scene: dict, orientation: str,
-                                   request_id: str = "") -> dict:
-        """Generate video from a scene image (i2v). Submits + polls."""
+                                   request_id: str = "", poll: bool = True) -> dict:
+        """Generate video from a scene image; callers may poll separately."""
         prefix = "vertical" if orientation == "VERTICAL" else "horizontal"
         image_media_id = scene.get(f"{prefix}_image_media_id")
         if not image_media_id:
@@ -493,6 +493,8 @@ class OperationService:
         if existing_op and not looks_like_workflow_uuid:
             logger.info("Video gen already submitted (op=%s), re-polling", existing_op[:30])
             operations = [{"operation": {"name": existing_op}, "status": "MEDIA_GENERATION_STATUS_PENDING"}]
+            if not poll:
+                return {"_async_operation": True, "operations": operations, "_poll_client": self._client}
             return await _poll_operations(self._client, operations)
         # else: workflow UUID — fall through and resubmit fresh
 
@@ -542,11 +544,14 @@ class OperationService:
             return {"error": "Video generation failed immediately"}
 
         logger.info("Video gen submitted, polling %d operations...", len(operations))
+        if not poll:
+            return {"_async_operation": True, "operations": operations, "_poll_client": self._client,
+                    "_installation_id": submit_result.get("_installation_id")}
         return await _poll_operations(self._client, operations)
 
     async def generate_scene_video_refs(self, scene: dict, orientation: str,
-                                        request_id: str = "") -> dict:
-        """Generate video from reference images (r2v). Submits + polls.
+                                        request_id: str = "", poll: bool = True) -> dict:
+        """Generate video from reference images (r2v); callers may poll separately.
 
         R2V uses any entity images (characters, visual_assets, locations) plus
         scene images as IMAGE_USAGE_TYPE_ASSET references — not just character
@@ -623,6 +628,8 @@ class OperationService:
         if existing_op:
             logger.info("R2V already submitted (op=%s), re-polling", existing_op[:30])
             operations = [{"operation": {"name": existing_op}, "status": "MEDIA_GENERATION_STATUS_PENDING"}]
+            if not poll:
+                return {"_async_operation": True, "operations": operations, "_poll_client": self._client}
             return await _poll_operations(self._client, operations)
 
         submit_result = await self._client.generate_video_from_references(
@@ -653,11 +660,14 @@ class OperationService:
             return {"error": "R2V failed immediately"}
 
         logger.info("R2V submitted with %d refs, polling %d operations...", len(ref_ids), len(operations))
+        if not poll:
+            return {"_async_operation": True, "operations": operations, "_poll_client": self._client,
+                    "_installation_id": submit_result.get("_installation_id")}
         return await _poll_operations(self._client, operations)
 
     async def upscale_scene_video(self, scene: dict, orientation: str,
-                                  request_id: str = "") -> dict:
-        """Upscale a completed scene video. Submits + polls.
+                                  request_id: str = "", poll: bool = True) -> dict:
+        """Upscale a completed scene video; callers may poll separately.
 
         If a previous attempt already submitted (op_name saved in DB), skip
         submit and just re-poll — avoids duplicate API calls on retry.
@@ -679,6 +689,9 @@ class OperationService:
             # Already submitted — just re-poll
             logger.info("Upscale already submitted (op=%s), re-polling", existing_op[:30])
             operations = [{"operation": {"name": existing_op}, "status": "MEDIA_GENERATION_STATUS_PENDING"}]
+            if not poll:
+                return {"_async_operation": True, "operations": operations, "_poll_client": self._client,
+                        "_poll_timeout": 300}
             return await _poll_operations(self._client, operations, timeout=300)
 
         submit_result = await self._client.upscale_video(
@@ -720,6 +733,9 @@ class OperationService:
             return {"error": "Upscale failed immediately"}
 
         logger.info("Upscale submitted, polling %d operations...", len(operations))
+        if not poll:
+            return {"_async_operation": True, "operations": operations, "_poll_client": self._client,
+                    "_installation_id": submit_result.get("_installation_id"), "_poll_timeout": 300}
         poll_result = await _poll_operations(self._client, operations, timeout=300)
 
         # Check poll result for rawBytes too

@@ -29,6 +29,12 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Client API v1"])
 
 
+def _wake_worker() -> None:
+    """Start queued v1 work immediately when the worker has capacity."""
+    from agent.worker.processor import get_worker_controller
+    get_worker_controller().notify_work_available()
+
+
 def _normalize_image_aspect(aspect: str | None) -> str:
     raw = str(aspect or "").strip().upper()
     mapping = {
@@ -111,6 +117,7 @@ def _build_job_item(req: dict) -> Job:
 
     return Job(
         id=jid,
+        operation_id=req.get("request_id"),
         project_id=project_id,
         routing_scope=None,
         provider="google_flow",
@@ -161,6 +168,7 @@ async def _resolve_jobs_response(job_ids: list[str]) -> JobsResponse:
         jobs=jobs,
         metadata=metadata,
         job_id=first_job.id if first_job else None,
+        operation_id=first_job.operation_id if first_job else None,
         type=first_job.type if first_job else None,
         generation_type=first_job.generation_type if first_job else None,
         status=first_job.status if first_job else None,
@@ -200,6 +208,7 @@ async def generate_image(payload: ImageGenerationRequest):
         )
         await db.commit()
 
+    _wake_worker()
     logger.info("v1 Client API queued Image Job %s (orientation=%s)", job_id, orientation)
     return await _resolve_jobs_response([job_id])
 
@@ -242,6 +251,7 @@ async def generate_images_batch(payload: BatchImageGenerationRequest | list[Imag
             )
         await db.commit()
 
+    _wake_worker()
     logger.info("v1 Client API queued %d Image Jobs in batch", len(job_ids))
     return await _resolve_jobs_response(job_ids)
 
@@ -283,6 +293,7 @@ async def generate_video(payload: VideoGenerationRequest):
         )
         await db.commit()
 
+    _wake_worker()
     logger.info("v1 Client API queued Video Job %s (type=%s, orientation=%s)", job_id, payload.type, orientation)
     return await _resolve_jobs_response([job_id])
 
@@ -333,6 +344,7 @@ async def generate_videos_batch(payload: BatchVideoGenerationRequest | list[Vide
             )
         await db.commit()
 
+    _wake_worker()
     logger.info("v1 Client API queued %d Video Jobs in batch", len(job_ids))
     return await _resolve_jobs_response(job_ids)
 

@@ -244,6 +244,10 @@ async def create_request(req_type: str, orientation: str = None,
                VALUES (?,?,?,?,?,?,?,?,?,?)""",
             (rid, project_id, video_id, scene_id, character_id, req_type, orientation, source_media_id, now, now))
         await db.commit()
+    # Import lazily to avoid a db <-> worker import cycle at application start.
+    # A queued request must wake an idle worker rather than wait for its poll.
+    from agent.worker.processor import get_worker_controller
+    get_worker_controller().notify_work_available()
     return await _get_with_db(db, "request", "id", rid)
 
 async def get_request(rid: str): return await _get("request", "id", rid)

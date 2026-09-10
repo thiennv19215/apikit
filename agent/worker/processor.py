@@ -76,7 +76,11 @@ class WorkerController:
 
     def __init__(self):
         self._shutdown = asyncio.Event()
+        # New work and released slots wake the scheduler immediately. The
+        # polling interval remains a fallback for external state changes.
+        self._work_available = asyncio.Event()
         self._active_ids: set[str] = set()
+        self._monitor_tasks: set[asyncio.Task] = set()
         self._rate_limiter = APIRateLimiter(MAX_CONCURRENT_REQUESTS, API_COOLDOWN)
         self._deferred: dict[str, float] = {}  # rid -> defer_until timestamp
         self._retry_after: dict[str, float] = {}  # rid -> retry_after timestamp
@@ -94,14 +98,37 @@ class WorkerController:
     def request_shutdown(self):
         """Signal the worker to stop after current tasks drain."""
         self._shutdown.set()
+        self._work_available.set()
+
+    def notify_work_available(self):
+        """Wake the scheduler after a request is queued or a slot is freed."""
+        self._work_available.set()
+
+    def start_monitor(self, coro) -> None:
+        """Run provider polling outside the submission-worker capacity."""
+        task = asyncio.create_task(coro)
+        self._monitor_tasks.add(task)
+        task.add_done_callback(self._monitor_tasks.discard)
+
+    async def _wait_for_work(self):
+        """Wait for work without delaying an available worker slot."""
+        try:
+            await asyncio.wait_for(self._work_available.wait(), timeout=POLL_INTERVAL)
+        except asyncio.TimeoutError:
+            pass
 
     async def drain(self, timeout: float = 30.0):
         """Wait until all active tasks complete, with timeout."""
         deadline = time.monotonic() + timeout
-        while self._active_ids and time.monotonic() < deadline:
+        while (self._active_ids or self._monitor_tasks) and time.monotonic() < deadline:
             await asyncio.sleep(0.5)
-        if self._active_ids:
-            logger.warning("Drain timeout: %d tasks still active after %.0fs", len(self._active_ids), timeout)
+        if self._active_ids or self._monitor_tasks:
+            logger.warning("Drain timeout: %d submissions, %d monitors still active after %.0fs",
+                           len(self._active_ids), len(self._monitor_tasks), timeout)
+            for task in list(self._monitor_tasks):
+                task.cancel()
+            if self._monitor_tasks:
+                await asyncio.gather(*self._monitor_tasks, return_exceptions=True)
 
     async def _cleanup_stale_processing(self):
         """Reset any requests stuck in PROCESSING state from a previous run."""
@@ -145,13 +172,16 @@ class WorkerController:
 
         while not self._shutdown.is_set():
             try:
+                # Clear before inspecting the queue: a notification received
+                # during this scheduling pass stays set for the next pass.
+                self._work_available.clear()
                 if not client.connected:
                     await self._expire_unserviceable_pending_requests()
-                    await asyncio.sleep(POLL_INTERVAL)
+                    await self._wait_for_work()
                     continue
 
                 if USE_BATCH_RPC and client._extensions and all(sess.get("has_flow_tab") is False for sess in client._extensions.values()):
-                    await asyncio.sleep(POLL_INTERVAL)
+                    await self._wait_for_work()
                     continue
 
                 now = time.time()
@@ -159,7 +189,7 @@ class WorkerController:
                 effective_concurrency = MAX_CONCURRENT_REQUESTS * num_extensions
                 slots_available = effective_concurrency - len(self._active_ids)
                 if slots_available <= 0:
-                    await asyncio.sleep(POLL_INTERVAL)
+                    await self._wait_for_work()
                     continue
 
                 pending = await crud.list_actionable_requests(
@@ -207,7 +237,7 @@ class WorkerController:
             except Exception as e:
                 logger.exception("Worker loop error: %s", e)
 
-            await asyncio.sleep(POLL_INTERVAL)
+            await self._wait_for_work()
 
     async def _run_one(self, req: dict):
         rid = req["id"]
@@ -220,6 +250,7 @@ class WorkerController:
                 self._rate_limiter.release()
         finally:
             self._active_ids.discard(rid)
+            self.notify_work_available()
 
 
 async def _prerequisites_met(req: dict, orientation: str) -> bool:
@@ -322,28 +353,54 @@ async def _process_one(req: dict, deferred: dict = None, retry_after: dict = Non
         result = await _dispatch(req, orientation)
         if _is_error(result):
             await _handle_failure(rid, req, result, retry_after)
+        elif result.get("_async_operation"):
+            # Flow accepted the job. Release this worker slot now; a separate
+            # monitor owns completion while clients can already see operation_id.
+            get_worker_controller().start_monitor(
+                _monitor_operation(req, orientation, result["operations"], result.get("_poll_client"),
+                                   result.get("_poll_timeout"))
+            )
         else:
-            gen_result = parse_result(result, req_type)
-            update_kw = {
-                "status": "COMPLETED",
-                "media_id": gen_result.media_id,
-                "output_url": gen_result.url,
-            }
-            if isinstance(result, dict) and result.get("_installation_id"):
-                update_kw["installation_id"] = result["_installation_id"]
-            await crud.update_request(rid, **update_kw)
-            if req_type in ("GENERATE_CHARACTER_IMAGE", "REGENERATE_CHARACTER_IMAGE", "EDIT_CHARACTER_IMAGE"):
-                char_id = req.get("character_id")
-                if char_id:
-                    await apply_character_result(char_id, gen_result)
-            else:
-                await apply_scene_result(req.get("scene_id"), req_type, orientation, gen_result)
-            await event_bus.emit("request_update", {"id": rid, "status": "COMPLETED"})
-            logger.info("Request %s COMPLETED: media=%s", rid[:8], gen_result.media_id[:20] if gen_result.media_id else "?")
+            await _complete_request(req, orientation, result)
     except Exception as e:
         logger.exception("Request %s exception: %s", rid[:8], e)
         await event_bus.emit("request_update", {"id": rid, "status": "FAILED", "error": str(e)})
         await _handle_failure(rid, req, {"error": str(e)}, retry_after)
+
+
+async def _complete_request(req: dict, orientation: str, result: dict) -> None:
+    """Persist a successful generation, shared by submit workers and pollers."""
+    rid, req_type = req["id"], req["type"]
+    gen_result = parse_result(result, req_type)
+    update_kw = {"status": "COMPLETED", "media_id": gen_result.media_id, "output_url": gen_result.url}
+    if result.get("_installation_id"):
+        update_kw["installation_id"] = result["_installation_id"]
+    await crud.update_request(rid, **update_kw)
+    if req_type in ("GENERATE_CHARACTER_IMAGE", "REGENERATE_CHARACTER_IMAGE", "EDIT_CHARACTER_IMAGE"):
+        if req.get("character_id"):
+            await apply_character_result(req["character_id"], gen_result)
+    else:
+        await apply_scene_result(req.get("scene_id"), req_type, orientation, gen_result)
+    await event_bus.emit("request_update", {"id": rid, "status": "COMPLETED"})
+    logger.info("Request %s COMPLETED: media=%s", rid[:8], gen_result.media_id[:20] if gen_result.media_id else "?")
+
+
+async def _monitor_operation(req: dict, orientation: str, operations: list[dict], client,
+                             timeout: int | None = None) -> None:
+    """Poll a Flow-accepted operation without consuming a submission slot."""
+    from agent.sdk.services.operations import _poll_operations
+    try:
+        kwargs = {"timeout": timeout} if timeout else {}
+        result = await _poll_operations(client or get_flow_client(), operations, **kwargs)
+        if _is_error(result):
+            await _handle_failure(req["id"], req, result)
+        else:
+            await _complete_request(req, orientation, result)
+    except Exception as e:
+        logger.exception("Operation monitor failed for %s: %s", req["id"][:8], e)
+        await _handle_failure(req["id"], req, {"error": str(e)})
+    finally:
+        get_worker_controller().notify_work_available()
 
 
 async def _dispatch(req: dict, orientation: str) -> dict:
@@ -370,11 +427,11 @@ async def _dispatch(req: dict, orientation: str) -> dict:
         if req_type == "EDIT_IMAGE":
             return await ops.edit_scene_image(scene, orientation, source_media_id=req.get("source_media_id"))
         if req_type in ("GENERATE_VIDEO", "REGENERATE_VIDEO"):
-            return await ops.generate_scene_video(scene, orientation, request_id=rid)
+            return await ops.generate_scene_video(scene, orientation, request_id=rid, poll=False)
         if req_type == "GENERATE_VIDEO_REFS":
-            return await ops.generate_scene_video_refs(scene, orientation, request_id=rid)
+            return await ops.generate_scene_video_refs(scene, orientation, request_id=rid, poll=False)
         if req_type == "UPSCALE_VIDEO":
-            return await ops.upscale_scene_video(scene, orientation, request_id=rid)
+            return await ops.upscale_scene_video(scene, orientation, request_id=rid, poll=False)
 
     # Character operations
     if req_type in ("GENERATE_CHARACTER_IMAGE", "REGENERATE_CHARACTER_IMAGE", "EDIT_CHARACTER_IMAGE"):
@@ -672,7 +729,8 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
         if status == "MEDIA_GENERATION_STATUS_FAILED":
             return {"error": f"Operation failed immediately: {op_name}"}
 
-        return await _poll_operations(client, operations)
+        return {"_async_operation": True, "operations": operations, "_poll_client": client,
+                "_installation_id": submit_result.get("_installation_id")}
 
     return {"error": f"Unsupported client v1 request type: {req_type}"}
 
