@@ -47,12 +47,7 @@ Tài liệu tham chiếu chuẩn xác và toàn diện nhất cho toàn bộ cá
 | | `GET` | `/v1/characters/{id}/reference-image` | Chuyển hướng tới link ảnh gốc nhân vật | 307 Temporary Redirect |
 | **Mỹ thuật** | `GET` | `/v1/materials` | Danh sách visual styles/materials (`realistic`, `3d_pixar`...) | 200 OK |
 | | `GET` | `/v1/materials/{id}` | Chi tiết phong cách & hướng dẫn prompt | 200 OK / 404 |
-| **Âm thanh** | `GET` | `/v1/audio/voices` | Danh sách mẫu giọng đọc (voice templates) | 200 OK |
-| | `POST` | `/v1/audio/speech` | Chuyển văn bản thành giọng nói (TTS) kèm Base64 | 200 OK |
-| | `POST` | `/v1/audio/music` | Tạo nhạc nền AI qua Suno | 202 Accepted |
-| | `GET` | `/v1/audio/music/{task_id}` | Kiểm tra trạng thái và link bài nhạc Suno | 200 OK / 404 |
-| | `GET` | `/v1/audio/speech/{id}.mp3` | Tải trực tiếp file âm thanh TTS | 200 OK / 404 |
-| **Hậu kỳ** | `POST` | `/v1/videos/concat` | Ghép nhiều video + voiceover + nhạc nền thành MP4 | 200 OK |
+| **Hậu kỳ** | `POST` | `/v1/videos/concat` | Ghép nhiều clip video thành MP4 hoàn chỉnh | 200 OK |
 | | `GET` | `/v1/videos/download/{filename}`| Tải file video hoàn thiện sau khi concat | 200 OK / 404 |
 
 ---
@@ -348,54 +343,10 @@ Lấy chi tiết prompt mẫu, hướng dẫn lighting, và từ khóa phủ đ�
 
 ---
 
-### 3.7. Âm Thanh & Nhạc Nền (Audio)
-
-#### `GET /v1/audio/voices`
-Danh sách mẫu giọng đọc (voice templates) cho thuyết minh TTS.
-
-#### `POST /v1/audio/speech`
-Sinh file âm thanh đọc thuyết minh từ văn bản.
-```bash
-curl -X POST https://apikit.shopcongngheso5.io.vn/v1/audio/speech \
-  -H "Content-Type: application/json" \
-  -d '{
-    "text": "Bóng đêm dần buông xuống trên thành phố tương lai.",
-    "speed": 1.0,
-    "instruct": "dramatic, deep voice"
-  }'
-```
-**Response (200 OK):**
-```json
-{
-  "id": "speech_12345",
-  "duration_seconds": 3.8,
-  "audio_url": "https://apikit.shopcongngheso5.io.vn/v1/audio/speech/speech_12345.mp3",
-  "audio_base64": "//uQZ..."
-}
-```
-
-#### `POST /v1/audio/music`
-Sinh bản nhạc nền AI bằng Suno.
-```bash
-curl -X POST https://apikit.shopcongngheso5.io.vn/v1/audio/music \
-  -H "Content-Type: application/json" \
-  -d '{
-    "prompt": "Deep cinematic synthwave with heavy bassline and ambient pads",
-    "style": "synthwave",
-    "title": "Neon Horizon",
-    "instrumental": true
-  }'
-```
-
-#### `GET /v1/audio/music/{task_id}`
-Kiểm tra tiến độ sinh nhạc Suno và lấy link MP3 bài hát hoàn chỉnh.
-
----
-
-### 3.8. Hậu Kỳ & Ghép Nối (Post-Processing)
+### 3.7. Hậu Kỳ & Ghép Nối Video (Post-Processing)
 
 #### `POST /v1/videos/concat`
-Ghép nối nhiều clip video con, tự động lồng tiếng thuyết minh (narration) và chèn nhạc nền (background music) thành file video MP4 hoàn chỉnh.
+Ghép nối nhiều clip video con (sinh từ Gemini Omni Flash) thành một file video MP4 hoàn chỉnh bằng ffmpeg.
 ```bash
 curl -X POST https://apikit.shopcongngheso5.io.vn/v1/videos/concat \
   -H "Content-Type: application/json" \
@@ -403,11 +354,7 @@ curl -X POST https://apikit.shopcongngheso5.io.vn/v1/videos/concat \
     "video_urls": [
       "https://storage.googleapis.com/...clip1.mp4",
       "https://storage.googleapis.com/...clip2.mp4"
-    ],
-    "narration_audio_url": "https://apikit.shopcongngheso5.io.vn/v1/audio/speech/speech_12345.mp3",
-    "music_url": "https://...",
-    "narration_volume": 1.0,
-    "music_volume": 0.25
+    ]
   }'
 ```
 **Response (200 OK):**

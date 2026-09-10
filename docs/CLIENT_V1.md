@@ -18,11 +18,7 @@ Client gửi ảnh dạng **Base64 (`image_base64`)** trực tiếp trong reques
 | | POST | `/v1/images/generations/batch` | 202 Accepted, tạo nhiều tác vụ sinh ảnh Base64 theo lô (batch) |
 | | POST | `/v1/videos/generations` | 202 Accepted, tạo tác vụ sinh video Gemini Omni Flash (First frame, Start+End, R2V) |
 | | POST | `/v1/videos/generations/batch` | 202 Accepted, tạo nhiều tác vụ sinh video Omni Flash theo lô (batch) |
-| **Audio & TTS** | GET | `/v1/audio/voices` | Danh sách mẫu giọng đọc (voice templates) |
-| | POST | `/v1/audio/speech` | Sinh file âm thanh giọng đọc (TTS) từ văn bản kèm Base64 và URL |
-| | POST | `/v1/audio/music` | 202 Accepted, sinh nhạc nền AI qua Suno |
-| | GET | `/v1/audio/music/{task_id}` | Tra cứu trạng thái và link bài nhạc Suno |
-| **Post-Process** | POST | `/v1/videos/concat` | Ghép nhiều clip video + lồng tiếng voiceover + nhạc nền thành MP4 hoàn chỉnh |
+| **Post-Process** | POST | `/v1/videos/concat` | Ghép nhiều clip video thành MP4 hoàn chỉnh bằng ffmpeg |
 | **Entities** | GET | `/v1/characters` | Liệt kê danh sách nhân vật/thực thể cố định |
 | | POST | `/v1/characters` | Tạo mới nhân vật kèm ảnh tham chiếu |
 | | GET | `/v1/characters/{id}` | Lấy thông tin chi tiết nhân vật |
@@ -422,65 +418,11 @@ curl -s https://apikit.shopcongngheso5.io.vn/v1/materials
 ```
 
 Chi tiết 1 phong cách:
-```bash
-curl -s https://apikit.shopcongngheso5.io.vn/v1/materials/3d_pixar
-```
-
 ---
 
-## 7. Âm thanh AI: Lồng tiếng (TTS) & Nhạc nền (Suno)
+## 7. Biên tập & Ghép nối Video (`POST /v1/videos/concat`)
 
-### 7.1. Danh sách giọng đọc có sẵn (`GET /v1/audio/voices`)
-```bash
-curl -s https://apikit.shopcongngheso5.io.vn/v1/audio/voices
-```
-
-### 7.2. Sinh giọng đọc thuyết minh (`POST /v1/audio/speech`)
-Nhận văn bản kịch bản và sinh ra file âm thanh MP3/WAV. Server trả về cả `audio_url` và `audio_base64`.
-
-```bash
-curl -X POST https://apikit.shopcongngheso5.io.vn/v1/audio/speech \
-  -H "Content-Type: application/json" \
-  -d '{
-    "text": "Neo-Saigon chua bao gio ngu, va toi cung vay.",
-    "voice_id": "narrator_calm",
-    "speed": 1.0,
-    "instruct": "Trầm ấm, điềm tĩnh, phong cách phim trinh thám"
-  }'
-```
-
-Response (HTTP 201):
-```json
-{
-  "id": "tts_8ab9c102ef14",
-  "duration_seconds": 3.2,
-  "audio_url": "https://apikit.shopcongngheso5.io.vn/v1/audio/download/tts_8ab9c102ef14.wav",
-  "audio_base64": "UklGRiQAAABXQVZF..."
-}
-```
-
-### 7.3. Sinh nhạc nền qua Suno (`POST /v1/audio/music`)
-```bash
-curl -X POST https://apikit.shopcongngheso5.io.vn/v1/audio/music \
-  -H "Content-Type: application/json" \
-  -d '{
-    "prompt": "Cyberpunk synthwave, driving dark beat, atmospheric neon pulse",
-    "style": "synthwave, electronic, cinematic",
-    "title": "Neon Chase",
-    "instrumental": true
-  }'
-```
-
-Tra cứu trạng thái bài nhạc:
-```bash
-curl -s https://apikit.shopcongngheso5.io.vn/v1/audio/music/<TASK_ID>
-```
-
----
-
-## 8. Biên tập & Ghép nối Video (`POST /v1/videos/concat`)
-
-Nhận danh sách URL các video clip (sinh từ Gemini Omni Flash), kết hợp cùng URL file giọng đọc và nhạc nền để xuất ra 1 file MP4 hoàn chỉnh bằng ffmpeg.
+Nhận danh sách URL các video clip (sinh từ Gemini Omni Flash) để xuất ra 1 file MP4 hoàn chỉnh bằng ffmpeg.
 
 ```bash
 curl -X POST https://apikit.shopcongngheso5.io.vn/v1/videos/concat \
@@ -489,11 +431,7 @@ curl -X POST https://apikit.shopcongngheso5.io.vn/v1/videos/concat \
     "video_urls": [
       "https://flow-content.google/video/clip1.mp4?...",
       "https://flow-content.google/video/clip2.mp4?..."
-    ],
-    "narration_audio_url": "https://apikit.shopcongngheso5.io.vn/v1/audio/download/tts_8ab9c102ef14.wav",
-    "narration_volume": 1.0,
-    "music_url": "https://cdn.suno.com/music_track.mp3",
-    "music_volume": 0.3
+    ]
   }'
 ```
 
@@ -508,7 +446,7 @@ Response (HTTP 201):
 
 ---
 
-## 9. Quản lý Thực thể & Nhân vật (`/v1/characters`)
+## 8. Quản lý Thực thể & Nhân vật (`/v1/characters`)
 
 Dành cho Agent muốn lưu trữ profile nhân vật/địa điểm cố định, tái sử dụng xuyên suốt nhiều cảnh phim.
 
@@ -520,7 +458,7 @@ Dành cho Agent muốn lưu trữ profile nhân vật/địa điểm cố địn
 
 ---
 
-## 10. Code mẫu tích hợp (SDK / Scripts)
+## 9. Code mẫu tích hợp (SDK / Scripts)
 
 ### Python (Sử dụng `requests`)
 
