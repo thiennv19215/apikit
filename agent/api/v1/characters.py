@@ -160,6 +160,7 @@ async def generate_character_image(character_id: str, body: CharacterImageGenera
         "character_id": character_id,
         "character_media_ids": ref_media_ids,
         "model": body.model,
+        "count": body.count,
         "input_images": [img.model_dump() for img in (body.input_images or [])],
         "project_id": body.project_id,
     }

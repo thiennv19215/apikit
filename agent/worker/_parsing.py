@@ -109,3 +109,25 @@ def _extract_output_url(result: dict, req_type: str) -> str:
                 return ""  # URL will be set by _save_raw_bytes in operations.py
 
     return data.get("videoUri", data.get("imageUri", ""))
+
+
+def _extract_media_items(result: dict, req_type: str) -> list[dict]:
+    """Extract all generated media items (media_id, url) from API response."""
+    data = result.get("data", result)
+    if not isinstance(data, dict):
+        return []
+    items: list[dict] = []
+    if req_type in ("GENERATE_IMAGE", "REGENERATE_IMAGE", "EDIT_IMAGE", "GENERATE_CHARACTER_IMAGE", "REGENERATE_CHARACTER_IMAGE", "EDIT_CHARACTER_IMAGE"):
+        media_list = data.get("media", [])
+        if isinstance(media_list, list):
+            for item in media_list:
+                if not isinstance(item, dict):
+                    continue
+                gen = item.get("image", {}).get("generatedImage", {}) if isinstance(item.get("image"), dict) else {}
+                url = gen.get("fifeUrl") or gen.get("imageUri") or item.get("url") or item.get("fifeUrl") or ""
+                media_id = item.get("media_id") or gen.get("mediaId") or item.get("name") or ""
+                if not media_id and url:
+                    media_id = _extract_uuid_from_url(url)
+                if url or media_id:
+                    items.append({"media_id": media_id or None, "url": url or None})
+    return items

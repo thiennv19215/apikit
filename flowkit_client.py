@@ -638,12 +638,14 @@ class FlowKitClient:
         prompt: str,
         aspect_ratio: str = "9:16",
         input_images: Optional[List[Dict[str, Any]]] = None,
+        count: int = 1,
     ) -> Dict[str, Any]:
         """Directly invoke image generation via Client V1 API."""
         payload = {
             "prompt": prompt,
             "aspect_ratio": aspect_ratio,
             "input_images": input_images or [],
+            "count": count,
         }
         return self._request("POST", "/v1/images/generations", json_data=payload)
 

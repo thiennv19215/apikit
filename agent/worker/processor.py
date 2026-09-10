@@ -25,7 +25,7 @@ from agent.config import (
     CLIENT_V1_QUEUE_TIMEOUT,
     USE_BATCH_RPC,
 )
-from agent.worker._parsing import _is_error
+from agent.worker._parsing import _is_error, _extract_media_items
 from agent.sdk.services.result_handler import parse_result, apply_scene_result, apply_character_result
 
 logger = logging.getLogger(__name__)
@@ -375,6 +375,20 @@ async def _complete_request(req: dict, orientation: str, result: dict) -> None:
     update_kw = {"status": "COMPLETED", "media_id": gen_result.media_id, "output_url": gen_result.url}
     if result.get("_installation_id"):
         update_kw["installation_id"] = result["_installation_id"]
+
+    media_items = _extract_media_items(result, req_type)
+    if media_items:
+        db_req = await crud.get_request(rid)
+        pj_raw = (db_req or {}).get("payload_json") or req.get("payload_json")
+        pj = {}
+        if pj_raw:
+            try:
+                pj = json.loads(pj_raw)
+            except Exception:
+                pass
+        pj["generated_media"] = media_items
+        update_kw["payload_json"] = json.dumps(pj)
+
     await crud.update_request(rid, **update_kw)
     if req_type in ("GENERATE_CHARACTER_IMAGE", "REGENERATE_CHARACTER_IMAGE", "EDIT_CHARACTER_IMAGE"):
         if req.get("character_id"):
@@ -567,6 +581,7 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
             except Exception as e:
                 logger.warning("Failed to cache uploaded media_id in request %s: %s", rid[:8], e)
 
+        count = payload.get("count") or payload.get("variant_count") or 1
         return await client.generate_images(
             prompt=prompt,
             project_id=pid,
@@ -574,6 +589,7 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
             character_media_ids=ref_media_ids if ref_media_ids else None,
             image_model=model,
             preferred_installation=inst_id,
+            count=count,
         )
 
     # 2. Video Generation

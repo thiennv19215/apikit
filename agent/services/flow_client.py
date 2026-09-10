@@ -868,7 +868,8 @@ class FlowClient:
                                user_paygate_tier: str = "PAYGATE_TIER_TWO",
                                character_media_ids: list[str] = None,
                                image_model: str = None,
-                               preferred_installation: str | None = None) -> dict:
+                               preferred_installation: str | None = None,
+                               count: int = 1) -> dict:
         """Generate image(s).
 
         ``character_media_ids`` are attached as reference images, which is what
@@ -878,7 +879,7 @@ class FlowClient:
         """
         if not USE_BATCH_RPC:
             return await self._legacy_generate_images(
-                prompt, project_id, aspect_ratio, user_paygate_tier, character_media_ids)
+                prompt, project_id, aspect_ratio, user_paygate_tier, character_media_ids, count=count)
 
         cand_ws = self._select_extension(
             require_token=False,
@@ -890,8 +891,9 @@ class FlowClient:
         )
         try:
             pid = self._batch_project_id(project_id, preferred_installation=target_inst)
+            safe_count = max(1, min(4, int(count or 1)))
             freq = fb.image_request(
-                prompt, pid, count=1, aspect=aspect_ratio,
+                prompt, pid, count=safe_count, aspect=aspect_ratio,
                 model=self._batch_image_model(image_model),
                 ref_media_ids=list(character_media_ids or []) or None,
             )
@@ -1322,7 +1324,8 @@ class FlowClient:
     async def _legacy_generate_images(self, prompt: str, project_id: str,
                                aspect_ratio: str = "IMAGE_ASPECT_RATIO_PORTRAIT",
                                user_paygate_tier: str = "PAYGATE_TIER_TWO",
-                               character_media_ids: list[str] = None) -> dict:
+                               character_media_ids: list[str] = None,
+                               count: int = 1) -> dict:
         """Generate image(s).
 
         If character_media_ids is provided, uses edit_image flow (batchGenerateImages

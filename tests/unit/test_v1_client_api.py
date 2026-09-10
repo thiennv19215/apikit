@@ -33,9 +33,9 @@ class FakeOps:
         return {"status": 200, "_mediaId": "media-uuid-1234"}
 
     async def generate_images(self, prompt, project_id="0", aspect_ratio="IMAGE_ASPECT_RATIO_LANDSCAPE",
-                              character_media_ids=None, image_model=None, preferred_installation=None):
+                              character_media_ids=None, image_model=None, preferred_installation=None, count=1):
         self.generated_images.append({
-            "prompt": prompt, "aspect": aspect_ratio, "refs": character_media_ids, "model": image_model
+            "prompt": prompt, "aspect": aspect_ratio, "refs": character_media_ids, "model": image_model, "count": count
         })
         return {
             "status": 200,
@@ -518,3 +518,81 @@ def test_flowkit_client_batch_methods(monkeypatch):
     assert poll_res["metadata"]["done"] is True
 
 
+
+
+@pytest.mark.asyncio
+async def test_image_generation_with_count_multiple_media():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        # 1. Submit with count=4
+        resp = await ac.post("/v1/images/generations", json={
+            "prompt": "4 cats in different costumes",
+            "aspect_ratio": "16:9",
+            "count": 4,
+        })
+        assert resp.status_code == 202
+        body = resp.json()
+        job_id = body["job_id"]
+        assert body["status"] == "queued"
+
+        # Verify payload_json stored count=4
+        req = await crud.get_request(job_id)
+        assert req is not None
+        pj = json.loads(req["payload_json"])
+        assert pj["count"] == 4
+
+        # 2. Simulate worker completing request with 4 generated images
+        from agent.worker.processor import _complete_request
+        mock_result = {
+            "status": 200,
+            "_installation_id": "inst_123",
+            "data": {
+                "media": [
+                    {
+                        "name": f"uuid-cat-{i}",
+                        "image": {
+                            "generatedImage": {
+                                "mediaId": f"uuid-cat-{i}",
+                                "fifeUrl": f"https://storage.googleapis.com/test/cat_{i}.jpg",
+                            }
+                        }
+                    }
+                    for i in range(1, 5)
+                ]
+            }
+        }
+        await _complete_request(req, "HORIZONTAL", mock_result)
+
+        # 3. Query GET /v1/jobs/{job_id}
+        get_resp = await ac.get(f"/v1/jobs/{job_id}")
+        assert get_resp.status_code == 200
+        comp_body = get_resp.json()
+        assert comp_body["status"] == "complete"
+        assert len(comp_body["media"]) == 4
+        for i, m in enumerate(comp_body["media"], start=1):
+            assert m["media_id"] == f"uuid-cat-{i}"
+            assert m["url"] == f"https://storage.googleapis.com/test/cat_{i}.jpg"
+            assert m["type"] == "image"
+
+
+@pytest.mark.asyncio
+async def test_image_generation_count_validation():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        # count > 4 rejected
+        r1 = await ac.post("/v1/images/generations", json={"prompt": "test", "count": 5})
+        assert r1.status_code == 422
+
+        # count < 1 rejected
+        r2 = await ac.post("/v1/images/generations", json={"prompt": "test", "count": 0})
+        assert r2.status_code == 422
+
+        # conflicting count and variant_count rejected
+        r3 = await ac.post("/v1/images/generations", json={"prompt": "test", "count": 2, "variant_count": 3})
+        assert r3.status_code == 422
+
+        # variant_count alias synced to count
+        r4 = await ac.post("/v1/images/generations", json={"prompt": "test", "variant_count": 3})
+        assert r4.status_code == 202
+        req = await crud.get_request(r4.json()["job_id"])
+        assert json.loads(req["payload_json"])["count"] == 3

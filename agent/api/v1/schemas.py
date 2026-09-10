@@ -66,8 +66,8 @@ class ImageGenerationRequest(ImageModelContract):
     aspect_ratio: str = "IMAGE_ASPECT_RATIO_LANDSCAPE"
     model: str | None = Field(default="NANO_BANANA_PRO", description="FlowKit model: NANO_BANANA_PRO or NANO_BANANA_2. Legacy aliases accepted.")
     image_model: str | None = Field(default=None, description="Alias for model; conflicting values return 422.")
-    count: int = Field(default=1, description="Compatibility-only; worker does not implement multiple variants. Use 1.")
-    variant_count: int = Field(default=1, description="Legacy count alias; multiple variants are not implemented.")
+    count: int = Field(default=1, ge=1, le=4, description="Number of images to generate (1-4). Default 1.")
+    variant_count: int = Field(default=1, ge=1, le=4, description="Alias for count (1-4).")
     quality: str | None = Field(default=None, description="Compatibility-only for images; not forwarded to provider.")
     project_id: str | None = None
     reference_media_ids: list[str] = Field(default_factory=list)
@@ -87,6 +87,8 @@ class ImageGenerationRequest(ImageModelContract):
             self.count = self.variant_count
         elif self.count > 1 and self.variant_count == 1:
             self.variant_count = self.count
+        elif self.count != self.variant_count:
+            raise ValueError(f"Conflicting count definitions: count={self.count}, variant_count={self.variant_count}")
         return self
 
 
@@ -277,10 +279,21 @@ class CharacterImageGenerationRequest(ImageModelContract):
     aspect_ratio: str = "16:9"
     model: str | None = None
     image_model: str | None = Field(default=None, description="Alias for model: NANO_BANANA_PRO or NANO_BANANA_2.")
-    variant_count: int = Field(default=1, description="Compatibility-only; multiple variants are not implemented.")
+    count: int = Field(default=1, ge=1, le=4, description="Number of images to generate (1-4). Default 1.")
+    variant_count: int = Field(default=1, ge=1, le=4, description="Alias for count (1-4).")
     input_images: list[InlineImageInput] = Field(default_factory=list)
     reference_media_ids: list[str] = Field(default_factory=list)
     project_id: str | None = None
+
+    @model_validator(mode="after")
+    def sync_counts(self):
+        if self.variant_count > 1 and self.count == 1:
+            self.count = self.variant_count
+        elif self.count > 1 and self.variant_count == 1:
+            self.variant_count = self.count
+        elif self.count != self.variant_count:
+            raise ValueError(f"Conflicting count definitions: count={self.count}, variant_count={self.variant_count}")
+        return self
 
 
 class CharacterVideoGenerationRequest(BaseModel):

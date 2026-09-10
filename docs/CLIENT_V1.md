@@ -65,6 +65,7 @@ Endpoint tạo tác vụ sinh ảnh bằng mô hình Banana Pro / Banana 2. Hỗ
 
 ### Tham số Request Body:
 - `prompt` (string, bắt buộc): Mô tả hình ảnh cần tạo.
+- `count` (int, tuỳ chọn, 1-4, mặc định 1): Số lượng biến thể ảnh sinh ra (1 đến 4 ảnh). Alias: `variant_count`. Khi hoàn thành, toàn bộ danh sách ảnh sẽ có trong mảng `media` của Job.
 - `aspect_ratio` (string, tuỳ chọn): Tỉ lệ ảnh. Giá trị chuẩn: `IMAGE_ASPECT_RATIO_LANDSCAPE` (16:9, mặc định), `IMAGE_ASPECT_RATIO_PORTRAIT` (9:16), `IMAGE_ASPECT_RATIO_SQUARE` (1:1), `IMAGE_ASPECT_RATIO_PORTRAIT_FOUR_THREE` (3:4), `IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE` (4:3). *Hỗ trợ alias rút gọn: `"16:9"`, `"9:16"`, `"1:1"`, `"PORTRAIT"`, `"LANDSCAPE"`.*
 - `model` (string, tuỳ chọn): Mô hình sinh ảnh. Mặc định `NANO_BANANA_PRO` (hoặc alias `"pro"`). Hỗ trợ `NANO_BANANA_2` (hoặc alias `"banana2"`).
 - `input_images` (array, tuỳ chọn): Danh sách ảnh tham chiếu dạng Base64.

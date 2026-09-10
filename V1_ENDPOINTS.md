@@ -86,6 +86,7 @@ Tạo tác vụ sinh ảnh bằng Banana Pro / Banana 2.
 
 **Request Body:**
 - `prompt` (string, bắt buộc): Mô tả hình ảnh cần tạo.
+- `count` (int, tuỳ chọn, 1-4, mặc định 1): Số lượng ảnh sinh ra (1 đến 4 ảnh). Alias: `variant_count`.
 - `aspect_ratio` (string, tuỳ chọn): Tỉ lệ ảnh (`"IMAGE_ASPECT_RATIO_LANDSCAPE"`, `"IMAGE_ASPECT_RATIO_PORTRAIT"`, `"IMAGE_ASPECT_RATIO_SQUARE"`, hoặc alias `"16:9"`, `"9:16"`, `"1:1"`). Mặc định `16:9`.
 - `model` (string, tuỳ chọn): `"NANO_BANANA_PRO"` (alias `"pro"`) hoặc `"NANO_BANANA_2"` (alias `"banana2"`).
 - `input_images` (array, tuỳ chọn): Mảng các ảnh tham chiếu dạng Base64 `[{"image_base64": "...", "mime_type": "image/jpeg"}]`.

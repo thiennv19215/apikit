@@ -97,7 +97,23 @@ def _build_job_item(req: dict) -> Job:
             pass
 
     media_items: list[GeneratedMedia] = []
-    if req.get("output_url"):
+    if req.get("payload_json"):
+        try:
+            pj_media = json.loads(req["payload_json"]).get("generated_media", [])
+            for m in pj_media:
+                if isinstance(m, dict) and (m.get("url") or m.get("media_id")):
+                    media_items.append(
+                        GeneratedMedia(
+                            id=m.get("media_id") or jid,
+                            type=job_type,
+                            url=m.get("url"),
+                            media_id=m.get("media_id"),
+                        )
+                    )
+        except Exception:
+            pass
+
+    if not media_items and req.get("output_url"):
         media_items.append(
             GeneratedMedia(
                 id=req.get("media_id") or jid,
