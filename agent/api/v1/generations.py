@@ -5,7 +5,7 @@ import logging
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Response, status
+from fastapi import APIRouter, Header, HTTPException, Response, status
 from fastapi.responses import JSONResponse
 
 from agent.api.v1.schemas import (
@@ -33,6 +33,32 @@ def _wake_worker() -> None:
     """Start queued v1 work immediately when the worker has capacity."""
     from agent.worker.processor import get_worker_controller
     get_worker_controller().notify_work_available()
+
+
+def _resolve_idempotency_key(header_key: str | None, body_key: str | None) -> str | None:
+    """Accept the standard HTTP header while retaining body compatibility."""
+    if header_key and body_key and header_key != body_key:
+        raise HTTPException(status_code=422, detail="Idempotency-Key header conflicts with idempotency_key body field.")
+    return header_key or body_key
+
+
+async def _find_idempotent_job(db, key: str | None, request_type: str) -> str | None:
+    """Return the newest existing job for a client retry key."""
+    if not key:
+        return None
+    cur = await db.execute(
+        "SELECT id, payload_json FROM request WHERE type=? AND payload_json IS NOT NULL "
+        "ORDER BY created_at DESC LIMIT 1000",
+        (request_type,),
+    )
+    for row in await cur.fetchall():
+        try:
+            payload = json.loads(row[1] or "{}")
+        except Exception:
+            continue
+        if payload.get("idempotency_key") == key:
+            return row[0]
+    return None
 
 
 def _normalize_image_aspect(aspect: str | None) -> str:
@@ -124,22 +150,67 @@ def _build_job_item(req: dict) -> Job:
         )
 
     job_error: JobError | None = None
-    if raw_status == "FAILED" and req.get("error_message"):
+    err_msg = req.get("error_message")
+    op_id = req.get("request_id")
+    if raw_status == "FAILED":
+        msg = err_msg or "Generation failed"
+        if "media not found" in msg.lower() or "từ chối tạo video" in msg.lower():
+            user_msg = "Google Flow từ chối tạo video (nội dung có thể vi phạm kiểm duyệt hoặc tác vụ bị huỷ)."
+        elif op_id and "operation id" not in msg.lower():
+            user_msg = f"Lỗi trong quá trình render/polling (Google Operation ID: {op_id}): {msg}"
+        else:
+            user_msg = msg
         job_error = JobError(
             code="GENERATION_FAILED",
-            message=req["error_message"],
-            details=req.get("error_message"),
+            message=user_msg,
+            details=err_msg or "Generation failed",
         )
+    elif raw_status in ("PROCESSING", "PENDING") and not req.get("output_url"):
+        created_at_str = req.get("created_at") or req.get("updated_at")
+        if created_at_str:
+            try:
+                from datetime import datetime, timezone
+                ts_clean = created_at_str.replace("Z", "+00:00")
+                cat = datetime.fromisoformat(ts_clean)
+                if cat.tzinfo is None:
+                    cat = cat.replace(tzinfo=timezone.utc)
+                elapsed = (datetime.now(timezone.utc) - cat).total_seconds()
+                from agent.config import VIDEO_POLL_TIMEOUT
+                if elapsed > VIDEO_POLL_TIMEOUT:
+                    job_status = "failed"
+                    if op_id:
+                        timeout_msg = f"Đã gửi job thành công (Operation ID: {op_id}) nhưng quá thời gian chờ Google Flow render ({int(elapsed)}s)."
+                    else:
+                        timeout_msg = f"Google Flow không trả về video sau {int(elapsed)}s (có thể tác vụ bị từ chối hoặc quá tải)."
+                    job_error = JobError(
+                        code="TIMEOUT",
+                        message=timeout_msg,
+                        details=err_msg or "Generation exceeded timeout",
+                    )
+            except Exception as exc:
+                job_status = "failed"
+                job_error = JobError(
+                    code="SYSTEM_STATE_INVALID",
+                    message="The job state could not be read safely.",
+                    details=f"Invalid job timestamp: {type(exc).__name__}",
+                )
+
+    phase = "queued" if job_status == "queued" else ("polling" if op_id else "submitting")
+    if job_status == "complete":
+        phase = "complete"
+    elif job_status == "failed":
+        phase = "failed"
 
     return Job(
         id=jid,
-        operation_id=req.get("request_id"),
+        operation_id=op_id,
         project_id=project_id,
         routing_scope=None,
         provider="google_flow",
         type=job_type,
         generation_type=generation_type,
         status=job_status,
+        phase=phase,
         media=media_items,
         error=job_error,
         installation_id=req.get("installation_id"),
@@ -196,14 +267,19 @@ async def _resolve_jobs_response(job_ids: list[str]) -> JobsResponse:
 
 
 @router.post("/v1/images/generations", response_model=JobsResponse, status_code=status.HTTP_202_ACCEPTED)
-async def generate_image(payload: ImageGenerationRequest):
+async def generate_image(
+    payload: ImageGenerationRequest,
+    idempotency_header: str | None = Header(default=None, alias="Idempotency-Key", min_length=1, max_length=200),
+):
     """Submit image generation task (accepts text prompt and optional Base64 reference images)."""
+    idempotency_key = _resolve_idempotency_key(idempotency_header, payload.idempotency_key)
     job_id = f"job_{uuid.uuid4().hex[:16]}"
     aspect = _normalize_image_aspect(payload.aspect_ratio)
     orientation = "HORIZONTAL" if "LANDSCAPE" in aspect else "VERTICAL"
 
     payload_dict = {
         "prompt": payload.prompt,
+        "idempotency_key": idempotency_key,
         "installation_id": payload.installation_id,
         "aspect_ratio": aspect,
         "input_images": [img.model_dump() for img in (payload.input_images or [])],
@@ -215,6 +291,9 @@ async def generate_image(payload: ImageGenerationRequest):
 
     db = await get_db()
     async with _db_lock:
+        existing_id = await _find_idempotent_job(db, idempotency_key, "GENERATE_IMAGE")
+        if existing_id:
+            return await _resolve_jobs_response([existing_id])
         await db.execute(
             """
             INSERT INTO request (id, type, orientation, status, payload_json, created_at, updated_at)
@@ -238,25 +317,35 @@ async def generate_images_batch(payload: BatchImageGenerationRequest | list[Imag
 
     job_ids: list[str] = []
     records = []
-    for item in items:
-        job_id = f"job_{uuid.uuid4().hex[:16]}"
-        aspect = _normalize_image_aspect(item.aspect_ratio)
-        orientation = "HORIZONTAL" if "LANDSCAPE" in aspect else "VERTICAL"
-        payload_dict = {
-            "prompt": item.prompt,
-            "installation_id": item.installation_id,
-            "aspect_ratio": aspect,
-            "input_images": [img.model_dump() for img in (item.input_images or [])],
-            "model": item.model,
-            "count": item.count,
-            "project_id": item.project_id,
-            "reference_media_ids": item.reference_media_ids,
-        }
-        records.append((job_id, "GENERATE_IMAGE", orientation, json.dumps(payload_dict)))
-        job_ids.append(job_id)
-
+    seen_keys: set[str] = set()
     db = await get_db()
     async with _db_lock:
+        for item in items:
+            if item.idempotency_key and item.idempotency_key in seen_keys:
+                raise HTTPException(status_code=409, detail=f"Duplicate idempotency_key in batch: {item.idempotency_key}")
+            if item.idempotency_key:
+                seen_keys.add(item.idempotency_key)
+            existing_id = await _find_idempotent_job(db, item.idempotency_key, "GENERATE_IMAGE")
+            if existing_id:
+                job_ids.append(existing_id)
+                continue
+            job_id = f"job_{uuid.uuid4().hex[:16]}"
+            aspect = _normalize_image_aspect(item.aspect_ratio)
+            orientation = "HORIZONTAL" if "LANDSCAPE" in aspect else "VERTICAL"
+            payload_dict = {
+                "prompt": item.prompt,
+                "idempotency_key": item.idempotency_key,
+                "installation_id": item.installation_id,
+                "aspect_ratio": aspect,
+                "input_images": [img.model_dump() for img in (item.input_images or [])],
+                "model": item.model,
+                "count": item.count,
+                "project_id": item.project_id,
+                "reference_media_ids": item.reference_media_ids,
+            }
+            records.append((job_id, "GENERATE_IMAGE", orientation, json.dumps(payload_dict)))
+            job_ids.append(job_id)
+
         for rec in records:
             await db.execute(
                 """
@@ -273,8 +362,12 @@ async def generate_images_batch(payload: BatchImageGenerationRequest | list[Imag
 
 
 @router.post("/v1/videos/generations", response_model=JobsResponse, status_code=status.HTTP_202_ACCEPTED)
-async def generate_video(payload: VideoGenerationRequest):
+async def generate_video(
+    payload: VideoGenerationRequest,
+    idempotency_header: str | None = Header(default=None, alias="Idempotency-Key", min_length=1, max_length=200),
+):
     """Submit video generation task (accepts Base64 input_images for i2v or r2v)."""
+    idempotency_key = _resolve_idempotency_key(idempotency_header, payload.idempotency_key)
     job_id = f"job_{uuid.uuid4().hex[:16]}"
     aspect = _normalize_video_aspect(payload.aspect_ratio)
     orientation = "HORIZONTAL" if "LANDSCAPE" in aspect else "VERTICAL"
@@ -284,8 +377,10 @@ async def generate_video(payload: VideoGenerationRequest):
 
     payload_dict = {
         "prompt": payload.prompt,
+        "idempotency_key": idempotency_key,
         "installation_id": payload.installation_id,
         "type": payload.type,
+        "generation_type": payload.generation_type or payload.type,
         "input_images": [img.model_dump() for img in payload.input_images],
         "aspect_ratio": aspect,
         "duration_seconds": payload.duration_seconds,
@@ -300,6 +395,9 @@ async def generate_video(payload: VideoGenerationRequest):
 
     db = await get_db()
     async with _db_lock:
+        existing_id = await _find_idempotent_job(db, idempotency_key, req_type)
+        if existing_id:
+            return await _resolve_jobs_response([existing_id])
         await db.execute(
             """
             INSERT INTO request (id, type, orientation, status, payload_json, created_at, updated_at)
@@ -323,33 +421,44 @@ async def generate_videos_batch(payload: BatchVideoGenerationRequest | list[Vide
 
     job_ids: list[str] = []
     records = []
-    for item in items:
-        job_id = f"job_{uuid.uuid4().hex[:16]}"
-        aspect = _normalize_video_aspect(item.aspect_ratio)
-        orientation = "HORIZONTAL" if "LANDSCAPE" in aspect else "VERTICAL"
-        is_ref_based = item.type in ("reference_to_video", "ingredients", "references", "omni", "r2v")
-        req_type = "GENERATE_VIDEO_REFS" if is_ref_based else "GENERATE_VIDEO"
-
-        payload_dict = {
-            "prompt": item.prompt,
-            "installation_id": item.installation_id,
-            "type": item.type,
-            "input_images": [img.model_dump() for img in item.input_images],
-            "aspect_ratio": aspect,
-            "duration_seconds": item.duration_seconds,
-            "project_id": item.project_id,
-            "start_media_id": item.start_media_id,
-            "end_media_id": item.end_media_id,
-            "reference_media_ids": item.reference_media_ids,
-            "model": item.model or item.mode or item.model_family or item.quality or "omni_flash",
-            "quality": item.quality,
-            "dialogue": item.dialogue,
-        }
-        records.append((job_id, req_type, orientation, json.dumps(payload_dict)))
-        job_ids.append(job_id)
-
+    seen_keys: set[str] = set()
     db = await get_db()
     async with _db_lock:
+        for item in items:
+            if item.idempotency_key and item.idempotency_key in seen_keys:
+                raise HTTPException(status_code=409, detail=f"Duplicate idempotency_key in batch: {item.idempotency_key}")
+            if item.idempotency_key:
+                seen_keys.add(item.idempotency_key)
+            req_type = "GENERATE_VIDEO_REFS" if item.type in ("reference_to_video", "ingredients", "references", "omni", "r2v") else "GENERATE_VIDEO"
+            existing_id = await _find_idempotent_job(db, item.idempotency_key, req_type)
+            if existing_id:
+                job_ids.append(existing_id)
+                continue
+            job_id = f"job_{uuid.uuid4().hex[:16]}"
+            aspect = _normalize_video_aspect(item.aspect_ratio)
+            orientation = "HORIZONTAL" if "LANDSCAPE" in aspect else "VERTICAL"
+            is_ref_based = item.type in ("reference_to_video", "ingredients", "references", "omni", "r2v")
+            req_type = "GENERATE_VIDEO_REFS" if is_ref_based else "GENERATE_VIDEO"
+
+            payload_dict = {
+                "prompt": item.prompt,
+                "idempotency_key": item.idempotency_key,
+                "installation_id": item.installation_id,
+                "type": item.type,
+                "input_images": [img.model_dump() for img in item.input_images],
+                "aspect_ratio": aspect,
+                "duration_seconds": item.duration_seconds,
+                "project_id": item.project_id,
+                "start_media_id": item.start_media_id,
+                "end_media_id": item.end_media_id,
+                "reference_media_ids": item.reference_media_ids,
+                "model": item.model or item.mode or item.model_family or item.quality or "omni_flash",
+                "quality": item.quality,
+                "dialogue": item.dialogue,
+            }
+            records.append((job_id, req_type, orientation, json.dumps(payload_dict)))
+            job_ids.append(job_id)
+
         for rec in records:
             await db.execute(
                 """

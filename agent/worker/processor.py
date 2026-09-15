@@ -23,6 +23,7 @@ from agent.config import (
     API_COOLDOWN,
     MAX_CONCURRENT_REQUESTS,
     CLIENT_V1_QUEUE_TIMEOUT,
+    CLIENT_V1_DISPATCH_TIMEOUT,
     USE_BATCH_RPC,
 )
 from agent.worker._parsing import _is_error, _extract_media_items
@@ -143,12 +144,16 @@ class WorkerController:
         except Exception as e:
             logger.warning("Could not clean up stale requests: %s", e)
 
-    async def _expire_unserviceable_pending_requests(self):
-        """Fail requests stuck in PENDING for too long when no extension is connected."""
+    async def _expire_unserviceable_pending_requests(self, immediate: bool = False):
+        """Fail v1 requests when no usable extension exists, or after the queue timeout."""
         try:
             pending = await crud.list_requests(status="PENDING")
             now = datetime.now(timezone.utc)
             for req in pending:
+                # This fast-fail policy is for the client v1 queue. Internal
+                # scene requests keep their normal prerequisite scheduling.
+                if not req.get("payload_json"):
+                    continue
                 c_at = req.get("created_at")
                 if not c_at:
                     continue
@@ -157,9 +162,14 @@ class WorkerController:
                     age = (now - t_c).total_seconds()
                 except Exception:
                     continue
-                if age > CLIENT_V1_QUEUE_TIMEOUT:
+                if immediate or age > CLIENT_V1_QUEUE_TIMEOUT:
                     rid = req["id"]
-                    msg = f"EXTENSION_UNAVAILABLE_TIMEOUT: Request expired after waiting {int(age)}s with no active Chrome extension connected."
+                    msg = (
+                        "PROFILE_UNAVAILABLE: No eligible Chrome extension/profile is available "
+                        "for this request."
+                        if immediate
+                        else f"EXTENSION_UNAVAILABLE_TIMEOUT: Request expired after waiting {int(age)}s with no active Chrome extension connected."
+                    )
                     await crud.update_request(rid, status="FAILED", error_message=msg)
                     await _mark_scene_failed(req)
                     logger.error("Request %s timed out waiting for extension (%ds): failed permanently", rid[:8], int(age))
@@ -176,11 +186,20 @@ class WorkerController:
                 # during this scheduling pass stays set for the next pass.
                 self._work_available.clear()
                 if not client.connected:
-                    await self._expire_unserviceable_pending_requests()
+                    await self._expire_unserviceable_pending_requests(immediate=True)
+                    await self._wait_for_work()
+                    continue
+
+                # Do not leave v1 jobs queued when every connected profile is
+                # exhausted/unavailable. _dispatch uses the same eligibility
+                # rules, so this check mirrors the actual routing decision.
+                if client._select_extension(not USE_BATCH_RPC) is None:
+                    await self._expire_unserviceable_pending_requests(immediate=True)
                     await self._wait_for_work()
                     continue
 
                 if USE_BATCH_RPC and client._extensions and all(sess.get("has_flow_tab") is False for sess in client._extensions.values()):
+                    await self._expire_unserviceable_pending_requests(immediate=True)
                     await self._wait_for_work()
                     continue
 
@@ -245,7 +264,24 @@ class WorkerController:
         try:
             await self._rate_limiter.acquire(inst_id)
             try:
-                await _process_one(req, self._deferred, self._retry_after)
+                if req.get("payload_json"):
+                    # A v1 dispatch must never remain PROCESSING forever if
+                    # an upload/submit call gets stuck before a provider job
+                    # is accepted. Provider polling has its own timeout.
+                    await asyncio.wait_for(
+                        _process_one(req, self._deferred, self._retry_after),
+                        timeout=CLIENT_V1_DISPATCH_TIMEOUT,
+                    )
+                else:
+                    await _process_one(req, self._deferred, self._retry_after)
+            except asyncio.TimeoutError:
+                msg = (
+                    f"V1_SYSTEM_TIMEOUT: request dispatch exceeded "
+                    f"{CLIENT_V1_DISPATCH_TIMEOUT}s before the provider accepted the job."
+                )
+                await crud.update_request(rid, status="FAILED", error_message=msg)
+                await event_bus.emit("request_update", {"id": rid, "status": "FAILED", "error": msg})
+                logger.error("Client v1 Request %s failed: %s", rid[:8], msg)
             finally:
                 self._rate_limiter.release()
         finally:
@@ -346,7 +382,7 @@ async def _process_one(req: dict, deferred: dict = None, retry_after: dict = Non
         return
 
     logger.info("Processing request %s type=%s", rid[:8], req_type)
-    await crud.update_request(rid, status="PROCESSING")
+    await crud.update_request(rid, status="PROCESSING", error_message=None)
     await event_bus.emit("request_update", {"id": rid, "status": "PROCESSING", "type": req_type})
 
     try:
@@ -885,10 +921,11 @@ async def _handle_failure(rid: str, req: dict, result: dict, retry_after: dict =
         failed_inst = (
             result.get("_installation_id")
             or req.get("installation_id")
-            or (client._extensions.get(client._extension_ws, {}).get("installation_id") if client._extension_ws else None)
         )
         if failed_inst:
-            client.mark_quota_exhausted(failed_inst)
+            msg_str = str(error_msg).lower()
+            dur = 43200 if ("public_error_user_quota_reached" in msg_str or "credits exhausted" in msg_str) else 300
+            client.mark_quota_exhausted(failed_inst, duration=dur)
 
         retry = req.get("retry_count", 0) + 1
         if retry < MAX_RETRIES:
@@ -914,6 +951,87 @@ async def _handle_failure(rid: str, req: dict, result: dict, retry_after: dict =
         else:
             # Max retries reached or all accounts out of quota
             error_text = f"QUOTA_EXHAUSTED: Account {failed_inst or 'active'} has exhausted quota (max retries reached): {error_msg}"
+            await crud.update_request(rid, status="FAILED", error_message=error_text)
+            await _mark_scene_failed(req)
+            logger.error("Request %s FAILED permanently: %s", rid[:8], error_text)
+            return
+
+    # Auth expired (HTTP 401/403 or missing envelope due to redirect): isolate profile & failover
+    is_403 = "403" in error_lower
+    is_401 = (
+        "401" in error_lower
+        or "unauthorized" in error_lower
+        or "no maseq envelope in response" in error_lower
+        or "no ogiz0b envelope in response" in error_lower
+        or "no envelope in response" in error_lower
+    )
+    if is_403 or is_401:
+        client = get_flow_client()
+        failed_inst = (
+            result.get("_installation_id")
+            or req.get("installation_id")
+        )
+        total_exts = len(client._extensions)
+        if total_exts <= 1:
+            if failed_inst:
+                for ws, sess in client._extensions.items():
+                    if sess.get("installation_id") == failed_inst:
+                        sess["unavailable_until"] = 0
+            logger.info("Account %s: Single extension connected, skipping cooldown penalty", failed_inst)
+        else:
+            cooldown = 180 if is_403 else 1800  # 403: 3 phut; 401: 30 phut
+            if failed_inst:
+                for ws, sess in client._extensions.items():
+                    if sess.get("installation_id") == failed_inst:
+                        sess["unavailable_until"] = time.time() + cooldown
+                        reason = "HTTP 403 (tam ngung 3 phut de thu lai)" if is_403 else "session expired / 401 (co lap 30m)"
+                        logger.warning("Account %s %s", failed_inst, reason)
+
+        retry = req.get("retry_count", 0) + 1
+        if retry < MAX_RETRIES:
+            logger.warning(
+                "Request %s: Account %s %s. Retrying with alternative profile (retry %d/%d).",
+                rid[:8], failed_inst or "unknown", "HTTP 403" if is_403 else "auth expired (401)", retry, MAX_RETRIES,
+            )
+            if req.get("scene_id") or req.get("character_id"):
+                try:
+                    await _recover_entity_not_found(req)
+                except Exception as e:
+                    logger.warning("Could not pre-recover media during auth failover: %s", e)
+
+            # Reset request to PENDING and clear installation_id so alternative candidate profile picks it up
+            if req.get("payload_json"):
+                try:
+                    p_data = json.loads(req["payload_json"])
+                    p_mod = False
+                    for img in p_data.get("input_images", []):
+                        if isinstance(img, dict) and img.get("image_base64") and img.get("media_id"):
+                            img.pop("media_id", None)
+                            p_mod = True
+                    if p_mod:
+                        await crud.update_request(rid, payload_json=json.dumps(p_data))
+                except Exception as e:
+                    logger.warning("Failed to reset input_images media_id for retry %s: %s", rid[:8], e)
+
+            err_tag = "HTTP 403 (se thu lai sau vai phut)" if is_403 else "auth expired (401)"
+            await crud.update_request(
+                rid, status="PENDING", retry_count=retry, installation_id=None,
+                error_message=f"failover: account {failed_inst} {err_tag}; switching to another account",
+            )
+            if retry_after is not None:
+                has_other_available = any(
+                    sess.get("installation_id") != failed_inst
+                    and sess.get("unavailable_until", 0) <= time.time()
+                    and not sess.get("quota_exhausted")
+                    for sess in client._extensions.values()
+                )
+                if total_exts <= 1:
+                    retry_after[rid] = time.time() + 3.0
+                else:
+                    retry_after[rid] = time.time() + (1.0 if has_other_available else (180.0 if is_403 else 60.0))
+            return
+        else:
+            error_text = f"AUTH_ERROR: Account {failed_inst or 'active'} {('HTTP 403' if is_403 else 'session expired (401)')}: {error_msg}"
             await crud.update_request(rid, status="FAILED", error_message=error_text)
             await _mark_scene_failed(req)
             logger.error("Request %s FAILED permanently: %s", rid[:8], error_text)
@@ -982,6 +1100,12 @@ async def _handle_failure(rid: str, req: dict, result: dict, retry_after: dict =
             await _mark_scene_failed(req)
             logger.error("Request %s FAILED after 10 reCAPTCHA retries: %s", rid[:8], error_msg)
             return
+
+    # For client v1 API (FlowCanvas calls), fail immediately on generation failure/drop
+    if req.get("payload_json"):
+        await crud.update_request(rid, status="FAILED", error_message=str(error_msg))
+        logger.error("Client v1 Request %s FAILED: %s", rid[:8], error_msg)
+        return
 
     retry = req.get("retry_count", 0) + 1
     if retry < MAX_RETRIES:

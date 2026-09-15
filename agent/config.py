@@ -49,11 +49,12 @@ DEFAULT_PAYGATE_TIER = os.environ.get("DEFAULT_PAYGATE_TIER", "PAYGATE_TIER_TWO"
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "5"))
 VIDEO_POLL_INTERVAL = int(os.environ.get("VIDEO_POLL_INTERVAL", "10"))  # polling interval for video/upscale status
 MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "5"))
-VIDEO_POLL_TIMEOUT = int(os.environ.get("VIDEO_POLL_TIMEOUT", "240"))
+VIDEO_POLL_TIMEOUT = int(os.environ.get("VIDEO_POLL_TIMEOUT", "120"))
 CLIENT_V1_QUEUE_TIMEOUT = int(os.environ.get("CLIENT_V1_QUEUE_TIMEOUT", "300"))
+CLIENT_V1_DISPATCH_TIMEOUT = int(os.environ.get("CLIENT_V1_DISPATCH_TIMEOUT", "120"))
 API_COOLDOWN = int(os.environ.get("API_COOLDOWN", "10"))  # seconds between API calls (anti-spam)
 MAX_CONCURRENT_REQUESTS = int(os.environ.get("MAX_CONCURRENT_REQUESTS", "5"))  # Google Flow max parallel requests
-STALE_PROCESSING_TIMEOUT = int(os.environ.get("STALE_PROCESSING_TIMEOUT", "600"))  # 10 min
+STALE_PROCESSING_TIMEOUT = int(os.environ.get("STALE_PROCESSING_TIMEOUT", "150"))  # 10 min
 
 # ─── Model Keys (loaded from models.json for easy updates) ──
 _MODELS_FILE = Path(__file__).parent / "models.json"

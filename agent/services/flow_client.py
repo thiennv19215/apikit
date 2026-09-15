@@ -157,16 +157,16 @@ class FlowClient:
                 return ws
         return None
 
-    def mark_quota_exhausted(self, installation_id: str | None = None, ws=None):
+    def mark_quota_exhausted(self, installation_id: str | None = None, ws=None, duration: float = 1800):
         """Mark an extension installation as quota-exhausted for 12 hours."""
         target_ws = ws or (self.get_extension_by_installation(installation_id) if installation_id else self._extension_ws)
         if target_ws and target_ws in self._extensions:
             sess = self._extensions[target_ws]
             sess["quota_exhausted"] = True
             sess["quota_exhausted_at"] = time.time()
-            sess["unavailable_until"] = time.time() + 43200  # 12 hours
+            sess["unavailable_until"] = time.time() + duration
             logger.warning(
-                "Extension profile marked QUOTA EXHAUSTED: installation=%s profile=%s (unavailable for 12h)",
+                "Extension profile marked QUOTA EXHAUSTED: installation=%s profile=%s (unavailable for %.0fs)",
                 sess.get("installation_id"),
                 sess.get("profile_name"),
             )
@@ -220,7 +220,8 @@ class FlowClient:
     def _extension_candidates(self, require_token: bool,
                               require_flow_tab: bool = False,
                               preferred_installation: str | None = None,
-                              preferred_project_id: str | None = None):
+                              preferred_project_id: str | None = None,
+                              allow_exhausted: bool = False):
         """Return usable extensions in preferred routing order with load balancing."""
         now = time.time()
         candidates = []
@@ -234,11 +235,14 @@ class FlowClient:
                 if require_token
                 else session.get("connected_at")
             )
+            is_single_ext = len(self._extensions) <= 1
             available = (
-                session.get("unavailable_until", 0) <= now
-                and not session.get("quota_exhausted", False)
+                is_single_ext or (
+                    session.get("unavailable_until", 0) <= now
+                    and not session.get("quota_exhausted", False)
+                )
             )
-            if not available:
+            if not available and not allow_exhausted:
                 continue
             matches_project = bool(
                 preferred_project_id
@@ -299,8 +303,13 @@ class FlowClient:
     @staticmethod
     def _should_failover(result: dict) -> bool:
         """Return true for profile-local failures that another tab can solve."""
+        status = result.get("status")
+        if isinstance(status, int) and status in (401, 403):
+            return True
         message = str(result.get("error") or result.get("data") or "").lower()
         if is_quota_error(message):
+            return True
+        if any(err in message for err in ("401", "403", "unauthorized", "no maseq envelope", "no ogiz0b envelope")):
             return True
         return any(marker in message for marker in (
             "no_flow_key",
@@ -593,7 +602,8 @@ class FlowClient:
 
     async def _send(self, method: str, params: dict, timeout: float = 300,
                     preferred_installation: str | None = None,
-                    preferred_project_id: str | None = None) -> dict:
+                    preferred_project_id: str | None = None,
+                    allow_exhausted: bool = False) -> dict:
         """Send request to extension and wait for response.
 
         Always returns a dict. On error, returns {"error": "<reason>"} — callers
@@ -605,11 +615,22 @@ class FlowClient:
 
         needs_token = not USE_BATCH_RPC
         needs_flow_tab = USE_BATCH_RPC and method == "batch_rpc"
+        # Read-only polling RPCs (operation status, project media list, media URL fetch)
+        # do not consume generation quota and must never be blocked by cooldown/quota_exhausted.
+        rpcid = params.get("rpcid") if isinstance(params, dict) else None
+        is_read_only = method == "batch_rpc" and rpcid in {
+            getattr(fb, "RPC_OPERATION", "jwpduf"),
+            getattr(fb, "RPC_PROJECT_MEDIA", "Zzl0ze"),
+            getattr(fb, "RPC_MEDIA", "as29s"),
+        }
+        effective_allow_exhausted = allow_exhausted or is_read_only
+
         extension_candidates = self._extension_candidates(
             require_token=needs_token,
             require_flow_tab=needs_flow_tab,
             preferred_installation=preferred_installation,
             preferred_project_id=preferred_project_id,
+            allow_exhausted=effective_allow_exhausted,
         )
         # A payload built for a profile's project/media cannot be replayed on
         # another account. Retry the complete job to rebuild its inputs instead.
@@ -667,8 +688,30 @@ class FlowClient:
             if self._should_failover(last_result):
                 if extension_ws in self._extensions:
                     err_msg = last_result.get("error") or last_result.get("data")
-                    if is_quota_error(err_msg):
-                        self.mark_quota_exhausted(ws=extension_ws)
+                    resp_status = last_result.get("status")
+                    total_exts = len(self._extensions)
+                    if total_exts <= 1:
+                        self._extensions[extension_ws]["unavailable_until"] = 0
+                        logger.info(
+                            "Single extension mode (%s): skipping cooldown penalty for error: %s",
+                            session.get("installation_id") or "?", err_msg
+                        )
+                    elif is_quota_error(err_msg):
+                        msg_str = str(err_msg).lower()
+                        duration = 43200 if ("public_error_user_quota_reached" in msg_str or "credits exhausted" in msg_str) else 300
+                        self.mark_quota_exhausted(ws=extension_ws, duration=duration)
+                    elif resp_status == 403 or "403" in str(err_msg):
+                        self._extensions[extension_ws]["unavailable_until"] = time.time() + 180
+                        logger.warning(
+                            "Extension %s returned HTTP 403; marking unavailable for 180s (3m) to retry",
+                            session.get("installation_id") or "?"
+                        )
+                    elif (isinstance(resp_status, int) and resp_status == 401) or any(k in str(err_msg).lower() for k in ("401", "unauthorized")):
+                        self._extensions[extension_ws]["unavailable_until"] = time.time() + 1800
+                        logger.warning(
+                            "Extension %s returned HTTP 401 / auth expired; marking unavailable for 30m",
+                            session.get("installation_id") or "?"
+                        )
                     else:
                         self._extensions[extension_ws]["unavailable_until"] = (
                             time.time() + 60
@@ -752,6 +795,13 @@ class FlowClient:
         )
         if result.get("error"):
             raise fb.FlowBatchError(f"{rpcid}: {result['error']}")
+        http_status = result.get("status")
+        if http_status and http_status != 200:
+            if http_status == 401:
+                raise fb.FlowBatchError(f"HTTP 401 Unauthorized from Google Flow: Session expired on profile Flow tab.")
+            if http_status == 403:
+                raise fb.FlowBatchError(f"HTTP 403 Forbidden from Google Flow: Current Google account has no access to this project.")
+            raise fb.FlowBatchError(f"Google Flow returned HTTP {http_status} for RPC {rpcid}")
         try:
             return fb.first_payload(result.get("data") or "", rpcid)
         except Exception as exc:
@@ -1097,6 +1147,21 @@ class FlowClient:
         if not media_id:
             media_id, complaint = await self._find_operation_media(operation_id, preferred_installation=target_inst)
             if not media_id:
+                rounds = self._operation_polls.get(operation_id, 0)
+                # Video render takes 50-70s on Google Flow.
+                # If after 8 rounds (~70-80s) no media appeared in project listing,
+                # Google Flow has rejected or dropped the operation.
+                if rounds >= 8:
+                    err_msg = complaint or "Google Flow từ chối tạo video (nội dung có thể vi phạm kiểm duyệt hoặc tác vụ bị huỷ)"
+                    if "Media not found" in str(err_msg):
+                        err_msg = "Google Flow từ chối tạo video (nội dung có thể vi phạm kiểm duyệt hoặc tác vụ bị huỷ)"
+                    logger.error("Operation %s failed after %d rounds: %s", operation_id[:20], rounds, err_msg)
+                    return {
+                        "operation": {"name": operation_id},
+                        "status": "MEDIA_GENERATION_STATUS_FAILED",
+                        "error": err_msg,
+                        "complaint": err_msg,
+                    }
                 return _as_pending_operation(operation_id, error=complaint)
             self._operation_media[operation_id] = media_id
 
@@ -1104,6 +1169,16 @@ class FlowClient:
         if not urls.video:
             # The id landed but the clip is still being written; downloading
             # now would save the poster still instead of the video.
+            rounds = self._operation_polls.get(operation_id, 0)
+            if rounds >= 12:
+                err_msg = complaint or "Hết thời gian chờ URL tải video từ Google Flow"
+                logger.error("Operation %s failed waiting for video URL after %d rounds", operation_id[:20], rounds)
+                return {
+                    "operation": {"name": operation_id},
+                    "status": "MEDIA_GENERATION_STATUS_FAILED",
+                    "error": err_msg,
+                    "complaint": err_msg,
+                }
             return _as_pending_operation(operation_id, error=complaint, media_id=media_id)
 
         # The media id stays cached rather than being cleared here: a batch
@@ -1132,6 +1207,7 @@ class FlowClient:
         project_id = self._operation_projects.get(operation_id) or FLOW_PROJECT_ID
         complaint = None
         worth_looking = rounds % 3 == 0
+        operation = None
         try:
             operation = fb.read_operation(
                 await self._batch_payload(
@@ -1155,7 +1231,10 @@ class FlowClient:
             return None, complaint
         if not project_id:
             return None, "no project id for the listing lookup"
-        return await self._media_id_for(operation_id, project_id, preferred_installation=preferred_installation), complaint
+        found_media = await self._media_id_for(operation_id, project_id, preferred_installation=preferred_installation)
+        if not found_media and operation is not None and operation.done and rounds >= 3:
+            complaint = complaint or "Google Flow báo hoàn thành nhưng không có video nào được tạo"
+        return found_media, complaint
 
     async def _media_id_for(self, operation_id: str, project_id: str, preferred_installation: str | None = None) -> str | None:
         """Find an operation's media id in the project listing.

@@ -8,6 +8,7 @@ services:
       - "9222:9222"
     volumes:
       - apikit_data:/app/data
+      - ./agent:/app/agent
     environment:
       - API_HOST=0.0.0.0
       - API_PORT=8100
@@ -16,6 +17,8 @@ services:
       - FLOW_DB_PATH=/app/data/flow_agent.db
       - FLOW_PROJECT_ID=${FLOW_PROJECT_ID:-}
       - FLOW_ALLOW_DEGRADED=1
+      - VIDEO_POLL_TIMEOUT=300
+      - STALE_PROCESSING_TIMEOUT=360
 
 volumes:
   apikit_data:

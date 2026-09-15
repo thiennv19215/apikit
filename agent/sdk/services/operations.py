@@ -286,23 +286,32 @@ async def _poll_operations(
         all_done = True
         has_error = False
         error_msg = ""
+        round_has_complaint = False
 
         for op in ops:
             if op.get("complaint"):
                 last_complaint = op["complaint"]
+                round_has_complaint = True
             status = op.get("status", "")
             if status == "MEDIA_GENERATION_STATUS_SUCCESSFUL":
                 continue
             elif status == "MEDIA_GENERATION_STATUS_FAILED":
                 op_name = op.get('operation', {}).get('name', '?')
-                # Log full operation for debugging failure reason
+                error_msg = op.get("error") or op.get("complaint") or f"Operation failed: {op_name}"
                 import json as _json
-                logger.error("Operation FAILED: name=%s full=%s", op_name, _json.dumps(op)[:1000])
-                error_msg = f"Operation failed: {op_name}"
+                logger.error("Operation FAILED: name=%s error=%s full=%s", op_name, error_msg, _json.dumps(op)[:1000])
                 has_error = True
                 break
             else:
                 all_done = False
+
+        if round_has_complaint and not any(op.get("status") == "MEDIA_GENERATION_STATUS_SUCCESSFUL" for op in ops):
+            consecutive_poll_errors += 1
+            if consecutive_poll_errors >= 6:
+                logger.error("Polling persistent error after 6 consecutive rounds: %s", last_complaint)
+                return {"error": f"Lỗi kết nối khi polling video từ Google Flow: {last_complaint}"}
+        else:
+            consecutive_poll_errors = 0
 
         if has_error:
             return {"error": error_msg}

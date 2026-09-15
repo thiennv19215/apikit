@@ -61,6 +61,7 @@ class ImageUploadResponse(BaseModel):
 
 class ImageGenerationRequest(ImageModelContract):
     prompt: str
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=200, description="Client request key used to safely retry without creating a duplicate job.")
     installation_id: str | None = None
     input_images: list[InlineImageInput] | None = None
     aspect_ratio: str = "IMAGE_ASPECT_RATIO_LANDSCAPE"
@@ -98,6 +99,7 @@ class BatchImageGenerationRequest(BaseModel):
 
 class VideoGenerationRequest(BaseModel):
     prompt: str
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=200, description="Client request key used to safely retry without creating a duplicate job.")
     installation_id: str | None = None
     type: str = "image_to_video"
     generation_type: str | None = Field(default=None, description="Preferred name for type; conflicting values are rejected.")
@@ -125,32 +127,56 @@ class VideoGenerationRequest(BaseModel):
                 "Direct media IDs (start_media_id, end_media_id, reference_media_ids) are not allowed on Client v1. "
                 "Pass images strictly as base64 in input_images (using image_base64)."
             )
-        aliases = {"i2v": "image_to_video", "r2v": "reference_to_video",
-                   "ingredients": "reference_to_video", "references": "reference_to_video",
-                   "omni": "reference_to_video", "start_end": "image_to_video",
-                   "first_last": "image_to_video", "start_end_frame_2_video": "image_to_video"}
+        aliases = {
+            "i2v": "image_to_video",
+            "frames_to_video": "image_to_video",
+            "frame_to_video": "image_to_video",
+            "start_end": "image_to_video",
+            "first_last": "image_to_video",
+            "start_end_frame_2_video": "image_to_video",
+            "first_and_last_frames_to_video": "image_to_video",
+            "image_to_video": "image_to_video",
+            "r2v": "reference_to_video",
+            "ingredients": "reference_to_video",
+            "references": "reference_to_video",
+            "omni": "reference_to_video",
+            "reference_to_video": "reference_to_video",
+        }
+
         def canonical(value):
             if value is not None and not isinstance(value, str):
                 raise ValueError("generation_type and type must be strings")
-            return aliases.get(value, value)
+            if value is None:
+                return None
+            return aliases.get(value.strip().lower(), value)
+
         preferred = data.get("generation_type")
         legacy = data.get("type")
         if preferred is not None and legacy is not None and canonical(preferred) != canonical(legacy):
             raise ValueError("generation_type and type must agree")
+
         has_refs = bool(data.get("reference_media_ids")) or any(
             isinstance(img, dict) and img.get("role") == "reference"
             for img in data.get("input_images", [])
         )
         default_type = "reference_to_video" if has_refs else "image_to_video"
-        value = canonical(preferred if preferred is not None else legacy or default_type)
-        data["type"] = data["generation_type"] = value
+        canonical_type = canonical(preferred if preferred is not None else legacy or default_type)
+        if canonical_type not in ("image_to_video", "reference_to_video"):
+            raise ValueError("Use image_to_video (first or first+last) or reference_to_video")
+
+        data["type"] = canonical_type
+        # Preserve specific start_end/first_last intent so processor knows to generate start+end
+        raw_specific = (preferred or legacy or "").strip().lower()
+        if raw_specific in ("start_end", "first_last", "start_end_frame_2_video", "first_and_last_frames_to_video"):
+            data["generation_type"] = "start_end"
+        else:
+            data["generation_type"] = canonical_type
+
         requested_model = data.get("model") or data.get("mode") or data.get("model_family") or "omni_flash"
         if isinstance(requested_model, str) and requested_model.strip().lower() in {"omni", "flash", "lite", "omni_flash"}:
             data["model"] = "omni_flash"
         else:
             raise ValueError("Client video supports only model=omni_flash")
-        if value not in ("image_to_video", "reference_to_video"):
-            raise ValueError("Use image_to_video (first or first+last) or reference_to_video")
         return data
 
 
@@ -203,6 +229,7 @@ class Job(BaseModel):
     type: Literal["image", "video"] | str = "image"
     generation_type: str = "image"
     status: Literal["queued", "running", "complete", "failed"] | str = "queued"
+    phase: Literal["queued", "submitting", "polling", "complete", "failed"] | str | None = None
     media: list[GeneratedMedia] = Field(default_factory=list)
     error: JobError | None = None
     installation_id: str | None = None

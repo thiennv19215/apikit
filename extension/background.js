@@ -661,6 +661,27 @@ async function reviveTabIfNeeded(tab) {
   }
 }
 
+/** Ensure Flow tab is active and its window is visible/restored.
+ *  reCAPTCHA Enterprise scores hidden/minimized windows poorly or hangs. */
+async function activateTabForCaptcha(tab) {
+  try {
+    if (tab?.windowId) {
+      const win = await chrome.windows.get(tab.windowId);
+      if (win.state === 'minimized') {
+        await chrome.windows.update(tab.windowId, { state: 'normal', focused: true });
+      } else if (!win.focused) {
+        await chrome.windows.update(tab.windowId, { focused: true });
+      }
+    }
+    if (tab?.id && !tab.active) {
+      await chrome.tabs.update(tab.id, { active: true });
+    }
+    await sleep(300);
+  } catch (e) {
+    console.debug('[FlowAgent] activateTabForCaptcha:', e?.message);
+  }
+}
+
 function captchaFromTab(tabId, requestId, captchaAction) {
   return Promise.race([
     requestCaptchaFromTab(tabId, requestId, captchaAction),
@@ -686,6 +707,7 @@ async function solveCaptcha(requestId, captchaAction) {
   for (const candidate of tabs) {
     const tab = await reviveTabIfNeeded(candidate);
     if (!tab) continue;
+    await activateTabForCaptcha(tab);
     try {
       const resp = await captchaFromTab(tab.id, requestId, captchaAction);
       if (!resp?.token) {
@@ -713,6 +735,7 @@ async function solveCaptcha(requestId, captchaAction) {
   try {
     const target = await openOrGetFlowTab({ createIfMissing: true });
     if (!target) return { error: 'NO_FLOW_TAB' };
+    await activateTabForCaptcha(target);
     return await captchaFromTab(target.id, requestId, captchaAction);
   } catch (e) {
     const msg = e?.message || errors[0] || 'NO_FLOW_TAB';
@@ -788,6 +811,9 @@ async function runBatchRpc(cmd) {
         },
         body: new URLSearchParams({ 'f.req': freqStr, at }),
       });
+      if (resp.status === 401 || resp.status === 403) {
+        return { status: resp.status, error: `HTTP_${resp.status}_UNAUTHORIZED` };
+      }
       const text = await resp.text();
       // The project listing is tens of megabytes and all we ever want from it
       // is one entry. Cutting it down here keeps that payload inside the tab
