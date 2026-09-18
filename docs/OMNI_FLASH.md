@@ -22,16 +22,19 @@ Use `http://127.0.0.1:8100` when the caller runs on the FlowKit host. For a remo
 
 | Mode | Inputs | Endpoint | Google Batch RPC | Wire Model Key |
 |---|---|---|---|---|
-| First frame to video | 1 uploaded start image | `POST /v1/videos/generations` | `eb1hJf` | `abra_i2v_<duration>s` |
-| First + Last frame | uploaded start and end images | `POST /v1/videos/generations` | `nprQif` | `omni_flash_i2v_<duration>s_first_last` |
-| References to video (R2V) | 1-7 uploaded reference images | `POST /v1/videos/generations` | `MZZa6b` | `abra_r2v_<duration>s` |
+| Text to video | prompt only (no images) | `POST /v1/videos/generations` | `YhhmEf` | `omni_flash` |
+| First frame to video | 1 uploaded start image | `POST /v1/videos/generations` | `eb1hJf` | `abra_i2v_<duration>s[_360p]` |
+| First + Last frame | uploaded start and end images | `POST /v1/videos/generations` | `nprQif` | `omni_flash_i2v_<duration>s_first_last[_360p]` |
+| References to video (R2V) | 1-7 uploaded reference images | `POST /v1/videos/generations` | `MZZa6b` | `abra_r2v_<duration>s[_360p]` |
 
-Supported durations are `4`, `6`, `8`, and `10` seconds. Supported aspect ratios are:
+Supported durations are `4`, `6`, `8`, and `10` seconds.
+Supported resolutions are `720p` (default) and `360p`.
+Supported aspect ratios are:
 
 - `VIDEO_ASPECT_RATIO_PORTRAIT` (`9:16`, default)
 - `VIDEO_ASPECT_RATIO_LANDSCAPE` (`16:9`)
 
-All 3 modes use native Google Flow Batch RPCs and Gemini Omni Flash. No Veo fallback is ever used.
+All 4 modes use native Google Flow Batch RPCs and Gemini Omni Flash. No Veo fallback is ever used.
 
 ## End-to-end integration flow
 

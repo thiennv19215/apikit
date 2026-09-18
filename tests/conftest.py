@@ -1,6 +1,14 @@
 """Shared pytest fixtures for Flow Kit tests."""
 
 import pytest
+from agent.db.schema import init_db
+
+
+@pytest.fixture(autouse=True)
+async def ensure_db_schema():
+    """Ensure DB tables exist for all unit tests."""
+    await init_db()
+    yield
 
 
 @pytest.fixture

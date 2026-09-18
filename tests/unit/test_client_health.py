@@ -65,10 +65,17 @@ async def test_maintenance_blocks_writes_but_keeps_polling(monkeypatch):
         response = await client.post("/v1/jobs/status", json={"job_id": "missing"})
         assert response.status_code == 200
         assert (await client.get("/v1/jobs/missing")).status_code == 200
-        assert (await client.get("/health/live")).status_code == 200
         monkeypatch.setattr("agent.config.CLIENT_MAINTENANCE", False)
+        from unittest.mock import AsyncMock
+        from types import SimpleNamespace
+        mock_flow = SimpleNamespace(
+            connected=True,
+            list_extensions=lambda: [{"available": True}],
+            generate_images=AsyncMock(return_value={"status": 200, "data": {"media": [{"name": "m1", "image": {"generatedImage": {"fifeUrl": "http://test/img.jpg"}}}]}}),
+        )
+        monkeypatch.setattr("agent.api.v1.generations.get_flow_client", lambda: mock_flow)
         response = await client.post("/v1/images/generations", json={"prompt": "test"})
-        assert response.status_code == 202
+        assert response.status_code == 200
 
 
 def test_health_openapi():

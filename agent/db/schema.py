@@ -7,7 +7,27 @@ from agent.config import DB_PATH
 logger = logging.getLogger(__name__)
 
 _db_connection: aiosqlite.Connection | None = None
-_db_lock = asyncio.Lock()
+class _LoopBoundLock:
+    def __init__(self):
+        self._locks = {}
+
+    def _get_lock(self) -> asyncio.Lock:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop not in self._locks:
+            self._locks[loop] = asyncio.Lock()
+        return self._locks[loop]
+
+    async def __aenter__(self):
+        return await self._get_lock().__aenter__()
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        return await self._get_lock().__aexit__(exc_type, exc_val, exc_tb)
+
+
+_db_lock = _LoopBoundLock()
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS character (

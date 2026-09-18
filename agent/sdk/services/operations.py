@@ -113,7 +113,7 @@ def _extract_operations(result: dict) -> list[dict]:
     # NEW schema: workflows + media → synthesize operation entries
     workflows = data.get("workflows", [])
     media_list = data.get("media", [])
-    if not workflows or not media_list:
+    if not workflows and not media_list:
         return []
 
     media_by_id = {m.get("name"): m for m in media_list if m.get("name")}
@@ -121,7 +121,9 @@ def _extract_operations(result: dict) -> list[dict]:
     for wf in workflows:
         wf_name = wf.get("name", "")
         meta = wf.get("metadata", {})
-        primary_media_id = meta.get("primaryMediaId", "")
+        primary_media_id = meta.get("primaryMediaId", "") or wf.get("primary_media_id", "")
+        if not wf_name:
+            wf_name = primary_media_id
         if not wf_name or not primary_media_id:
             continue
         synthesized.append({

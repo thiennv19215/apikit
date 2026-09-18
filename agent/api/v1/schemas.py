@@ -10,6 +10,8 @@ def normalize_image_model(value: str | None) -> str:
         return "NANO_BANANA_PRO"
     if norm in ("banana2", "banana_2", "narwhal", "nano_banana_2"):
         return "NANO_BANANA_2"
+    if norm in ("banana2_lite", "banana_2_lite", "nano_banana_2_lite", "harbor_seal", "harborseal", "lite"):
+        return "NANO_BANANA_2_LITE"
     return value or "NANO_BANANA_PRO"
 
 
@@ -35,11 +37,21 @@ class ImageModelContract(BaseModel):
 
 
 class InlineImageInput(BaseModel):
-    image_base64: str = Field(..., description="Base64-encoded image content. Direct media IDs are not allowed on Client v1.")
+    image_base64: str | None = Field(default=None, description="Base64-encoded image content.")
+    image_url: str | None = Field(default=None, description="Direct URL to image (S3, CDN, web).")
     media_id: str | None = None
     mime_type: str = "image/jpeg"
     file_name: str = "reference.png"
     role: Literal["start_frame", "end_frame", "reference"] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_content(cls, data):
+        if not isinstance(data, dict):
+            return data
+        if not data.get("image_base64") and not data.get("image_url"):
+            raise ValueError("Direct media IDs are not allowed on Client v1. Pass images as image_base64 or image_url.")
+        return data
 
 
 class ImageUploadRequest(BaseModel):
@@ -65,13 +77,13 @@ class ImageGenerationRequest(ImageModelContract):
     installation_id: str | None = None
     input_images: list[InlineImageInput] | None = None
     aspect_ratio: str = "IMAGE_ASPECT_RATIO_LANDSCAPE"
-    model: str | None = Field(default="NANO_BANANA_PRO", description="FlowKit model: NANO_BANANA_PRO or NANO_BANANA_2. Legacy aliases accepted.")
+    model: str | None = Field(default="NANO_BANANA_PRO", description="FlowKit model: NANO_BANANA_PRO, NANO_BANANA_2, or NANO_BANANA_2_LITE. Legacy aliases accepted.")
     image_model: str | None = Field(default=None, description="Alias for model; conflicting values return 422.")
     count: int = Field(default=1, ge=1, le=4, description="Number of images to generate (1-4). Default 1.")
     variant_count: int = Field(default=1, ge=1, le=4, description="Alias for count (1-4).")
     quality: str | None = Field(default=None, description="Compatibility-only for images; not forwarded to provider.")
-    project_id: str | None = None
     reference_media_ids: list[str] = Field(default_factory=list)
+    project_id: str | None = Field(default=None, description="Google Flow project ID")
 
     @model_validator(mode="before")
     @classmethod
@@ -93,6 +105,81 @@ class ImageGenerationRequest(ImageModelContract):
         return self
 
 
+class ImageUpscaleRequest(BaseModel):
+    media_id: str | None = Field(default=None, description="Direct Google Flow media_id if already uploaded.")
+    image_base64: str | None = Field(default=None, description="Base64-encoded JPEG/PNG image to upscale directly.")
+    image_url: str | None = Field(default=None, description="Direct URL of image to upscale.")
+    quality: Literal["2K", "4K", "2k", "4k"] = Field(default="2K", description="Upscale resolution: 2K or 4K.")
+    resolution: Literal["2K", "4K", "2k", "4k"] | None = Field(default=None, description="Alias for quality.")
+    project_id: str | None = None
+    installation_id: str | None = None
+    download: bool = Field(default=False, description="If true, return raw binary JPEG attachment instead of JSON.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_inputs(cls, data):
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        if not data.get("media_id") and not data.get("image_base64") and not data.get("image_url"):
+            raise ValueError("Must provide either media_id, image_base64, or image_url to upscale.")
+        res = data.get("resolution") or data.get("quality") or "2K"
+        data["quality"] = str(res).upper()
+        return data
+
+
+class ImageEditRequest(BaseModel):
+    prompt: str = Field(..., description="Prompt describing the desired modification or scene.")
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
+    installation_id: str | None = None
+    base_image_base64: str | None = Field(default=None, description="Base64-encoded source image to transform.")
+    base_image_url: str | None = Field(default=None, description="URL of source image to transform.")
+    base_media_id: str | None = Field(default=None, description="Existing media ID of the base image.")
+    input_images: list[InlineImageInput] = Field(default_factory=list, description="Reference images for character/style.")
+    aspect_ratio: str = "IMAGE_ASPECT_RATIO_LANDSCAPE"
+    model: str | None = Field(default=None, description="Image model name (NANO_BANANA_PRO, NANO_BANANA_2, NANO_BANANA_2_LITE).")
+    image_model: str | None = None
+    count: int = Field(default=1, ge=1, le=4, description="Number of variants (1-4).")
+    variant_count: int = Field(default=1, ge=1, le=4)
+    seed: int | None = None
+    project_id: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_inputs(cls, data):
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        if not data.get("base_image_base64") and not data.get("base_media_id") and not data.get("base_image_url"):
+            imgs = data.get("input_images", [])
+            if imgs and isinstance(imgs, list) and isinstance(imgs[0], dict):
+                if imgs[0].get("image_base64"):
+                    data["base_image_base64"] = imgs[0]["image_base64"]
+                    data["input_images"] = imgs[1:]
+                elif imgs[0].get("image_url"):
+                    data["base_image_url"] = imgs[0]["image_url"]
+                    data["input_images"] = imgs[1:]
+                elif imgs[0].get("media_id"):
+                    data["base_media_id"] = imgs[0]["media_id"]
+                    data["input_images"] = imgs[1:]
+                else:
+                    raise ValueError("Image edit requires a base image (base_image_base64, base_image_url, or base_media_id).")
+            else:
+                raise ValueError("Image edit requires a base image (base_image_base64, base_image_url, or base_media_id).")
+        m = data.get("model") or data.get("image_model")
+        if m:
+            data["model"] = normalize_image_model(m)
+        return data
+
+    @model_validator(mode="after")
+    def sync_counts(self):
+        if self.variant_count > 1 and self.count == 1:
+            self.count = self.variant_count
+        elif self.count > 1 and self.variant_count == 1:
+            self.variant_count = self.count
+        return self
+
+
 class BatchImageGenerationRequest(BaseModel):
     requests: list[ImageGenerationRequest] = Field(..., min_length=1, description="List of image generation tasks.")
 
@@ -106,6 +193,7 @@ class VideoGenerationRequest(BaseModel):
     input_images: list[InlineImageInput] = Field(default_factory=list)
     aspect_ratio: str = "VIDEO_ASPECT_RATIO_LANDSCAPE"
     duration_seconds: Literal[4, 6, 8, 10] = 8
+    resolution: Literal["360p", "720p"] = "720p"
     model: Literal["omni_flash"] | None = "omni_flash"
     quality: str | None = None
     mode: str | None = None
@@ -115,6 +203,7 @@ class VideoGenerationRequest(BaseModel):
     end_media_id: str | None = None
     reference_media_ids: list[str] = Field(default_factory=list)
     dialogue: bool = Field(default=False, description="Compatibility-only; not an audio toggle. Describe speech in prompt.")
+    seed: int | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -141,6 +230,9 @@ class VideoGenerationRequest(BaseModel):
             "references": "reference_to_video",
             "omni": "reference_to_video",
             "reference_to_video": "reference_to_video",
+            "t2v": "text_to_video",
+            "text": "text_to_video",
+            "text_to_video": "text_to_video",
         }
 
         def canonical(value):
@@ -159,13 +251,21 @@ class VideoGenerationRequest(BaseModel):
             isinstance(img, dict) and img.get("role") == "reference"
             for img in data.get("input_images", [])
         )
-        default_type = "reference_to_video" if has_refs else "image_to_video"
+        has_images = bool(data.get("input_images"))
+        if preferred or legacy:
+            default_type = canonical(preferred or legacy)
+        elif has_refs:
+            default_type = "reference_to_video"
+        elif has_images:
+            default_type = "image_to_video"
+        else:
+            default_type = "text_to_video"
+
         canonical_type = canonical(preferred if preferred is not None else legacy or default_type)
-        if canonical_type not in ("image_to_video", "reference_to_video"):
-            raise ValueError("Use image_to_video (first or first+last) or reference_to_video")
+        if canonical_type not in ("image_to_video", "reference_to_video", "text_to_video"):
+            raise ValueError("Use image_to_video (first or first+last), reference_to_video, or text_to_video")
 
         data["type"] = canonical_type
-        # Preserve specific start_end/first_last intent so processor knows to generate start+end
         raw_specific = (preferred or legacy or "").strip().lower()
         if raw_specific in ("start_end", "first_last", "start_end_frame_2_video", "first_and_last_frames_to_video"):
             data["generation_type"] = "start_end"
@@ -257,6 +357,18 @@ class JobsResponse(BaseModel):
     media: list[GeneratedMedia] = Field(default_factory=list)
     error: JobError | None = None
     installation_id: str | None = None
+
+
+class JobPollResponse(BaseModel):
+    job_id: str = Field(..., description="Mã tác vụ duy nhất.")
+    id: str | None = Field(default=None, description="Alias cho job_id.")
+    status: Literal["queued", "running", "complete", "failed"] | str = Field(..., description="Trạng thái hiện tại: queued, running, complete, failed.")
+    type: Literal["image", "video"] | str = Field(default="video", description="Loại tác vụ: video hoặc image.")
+    url: str | None = Field(default=None, description="Đường dẫn trực tiếp tới file media khi đã hoàn thành.")
+    media: list[GeneratedMedia] = Field(default_factory=list, description="Danh sách media kết quả.")
+    error: JobError | str | None = Field(default=None, description="Thông tin lỗi nếu tác vụ thất bại.")
+    installation_id: str | None = Field(default=None, description="ID extension profile thực thi tác vụ.")
+
 
 
 # ─── Character Schemas ────────────────────────────────────────

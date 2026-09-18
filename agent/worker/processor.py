@@ -545,7 +545,7 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
     # uploaded again on another profile; keep the source bytes across retries.
     from agent.services.execution_audit import media_owner
     raw_ids = list(payload.get("reference_media_ids") or []) + list(payload.get("character_media_ids") or [])
-    raw_ids += [payload[key] for key in ("start_media_id", "end_media_id") if payload.get(key)]
+    raw_ids += [payload[key] for key in ("start_media_id", "end_media_id", "base_media_id") if payload.get(key)]
     raw_ids += [img["media_id"] for img in payload.get("input_images", [])
                 if img.get("media_id") and not img.get("image_base64")]
     for media_id in dict.fromkeys(raw_ids):
@@ -577,8 +577,8 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
             except Exception as e:
                 return {"error": f"PROFILE_UNAVAILABLE: selected profile has no usable Flow project: {e}"}
 
-    # 1. Image Generation
-    if req_type in ("GENERATE_IMAGE", "REGENERATE_IMAGE", "GENERATE_CHARACTER_IMAGE"):
+    # 1. Image Generation & Editing
+    if req_type in ("GENERATE_IMAGE", "REGENERATE_IMAGE", "GENERATE_CHARACTER_IMAGE", "EDIT_IMAGE"):
         prompt = payload.get("prompt") or ""
         aspect_ratio = payload.get("aspect_ratio") or (
             "IMAGE_ASPECT_RATIO_PORTRAIT" if orientation == "VERTICAL" else "IMAGE_ASPECT_RATIO_LANDSCAPE"
@@ -586,9 +586,29 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
         model = payload.get("model")
         input_images = payload.get("input_images") or []
         ref_media_ids = list(payload.get("character_media_ids") or []) + list(payload.get("reference_media_ids") or [])
+        base_media_id = payload.get("base_media_id")
+        base_image_base64 = payload.get("base_image_base64")
 
         # Auto-upload Base64 or collect media_ids
         payload_modified = False
+
+        if base_image_base64 and not base_media_id:
+            upload_res = await client.upload_image(
+                image_base64=base_image_base64,
+                mime_type="image/jpeg",
+                project_id=pid,
+                preferred_installation=inst_id,
+            )
+            if upload_res.get("error"):
+                return upload_res
+            mid = upload_res.get("_mediaId") or upload_res.get("data", {}).get("media", {}).get("name")
+            if mid:
+                base_media_id = mid
+                payload["base_media_id"] = mid
+                inst_id = upload_res.get("_installation_id") or inst_id
+                pid = upload_res.get("_projectId") or pid
+                payload_modified = True
+
         for img in input_images:
             if not isinstance(img, dict):
                 continue
@@ -618,6 +638,22 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
                 logger.warning("Failed to cache uploaded media_id in request %s: %s", rid[:8], e)
 
         count = payload.get("count") or payload.get("variant_count") or 1
+
+        if req_type == "EDIT_IMAGE":
+            if not base_media_id:
+                return {"error": "Image edit requires a base image (base_image_base64 or base_media_id)"}
+            return await client.edit_image(
+                prompt=prompt,
+                source_media_id=base_media_id,
+                project_id=pid,
+                aspect_ratio=aspect_ratio,
+                character_media_ids=ref_media_ids if ref_media_ids else None,
+                image_model=model,
+                preferred_installation=inst_id,
+                count=count,
+                seed=payload.get("seed"),
+            )
+
         return await client.generate_images(
             prompt=prompt,
             project_id=pid,
@@ -629,7 +665,7 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
         )
 
     # 2. Video Generation
-    if req_type in ("GENERATE_VIDEO", "REGENERATE_VIDEO", "GENERATE_VIDEO_REFS"):
+    if req_type in ("GENERATE_VIDEO", "REGENERATE_VIDEO", "GENERATE_VIDEO_REFS", "GENERATE_VIDEO_TEXT"):
         prompt = payload.get("prompt") or ""
         aspect_ratio = payload.get("aspect_ratio") or (
             "VIDEO_ASPECT_RATIO_PORTRAIT" if orientation == "VERTICAL" else "VIDEO_ASPECT_RATIO_LANDSCAPE"
@@ -714,30 +750,42 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
                     ref_media_ids.extend(uploaded_mids)
 
         is_ref_based = req_type == "GENERATE_VIDEO_REFS" or bool(ref_media_ids)
-
-        if video_model == "omni_flash" or payload.get("mode") == "omni":
-            try:
-                import importlib
-                omni_mod = importlib.import_module("agent.services.client_omni")
-                execute_omni = getattr(omni_mod, "execute_omni")
-                payload["aspect_ratio"] = aspect_ratio
-                return await execute_omni(
-                    req, payload, client, inst_id, pid,
-                    start_media_id=start_media_id, end_media_id=end_media_id,
-                    reference_media_ids=ref_media_ids,
-                )
-            except (ImportError, ModuleNotFoundError, AttributeError):
-                pass
+        is_text_video = (
+            req_type == "GENERATE_VIDEO_TEXT"
+            or payload.get("type") in ("text_to_video", "t2v", "text")
+            or (not start_media_id and not end_media_id and not ref_media_ids)
+        )
 
         duration = payload.get("duration_seconds", 8)
-        if is_ref_based and ref_media_ids:
+        resolution = payload.get("resolution", "720p")
+        model_suffix = "_360p" if resolution == "360p" else ""
+
+        if is_text_video:
+            if hasattr(client, "generate_text_video"):
+                submit_result = await client.generate_text_video(
+                    prompt=prompt,
+                    project_id=pid,
+                    duration_s=duration,
+                    aspect_ratio=aspect_ratio,
+                    preferred_installation=inst_id,
+                )
+            else:
+                from agent.services import omni_flash
+                submit_result = await omni_flash.generate_omni_flash_text_video(
+                    prompt=prompt,
+                    project_id=pid,
+                    duration_s=duration,
+                    aspect_ratio=aspect_ratio,
+                    preferred_installation=inst_id,
+                )
+        elif is_ref_based and ref_media_ids:
             submit_result = await client.generate_video_from_references(
                 reference_media_ids=ref_media_ids,
                 prompt=prompt,
                 project_id=pid,
                 scene_id="",
                 aspect_ratio=aspect_ratio,
-                video_model=f"abra_r2v_{duration}s",
+                video_model=f"abra_r2v_{duration}s{model_suffix}",
                 preferred_installation=inst_id,
             )
         elif start_media_id and end_media_id:
@@ -748,7 +796,7 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
                 project_id=pid,
                 scene_id="",
                 aspect_ratio=aspect_ratio,
-                video_model=f"omni_flash_i2v_{duration}s_first_last",
+                video_model=f"omni_flash_i2v_{duration}s_first_last{model_suffix}",
                 preferred_installation=inst_id,
             )
         else:
@@ -760,7 +808,7 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
                 project_id=pid,
                 scene_id="",
                 aspect_ratio=aspect_ratio,
-                video_model=f"abra_i2v_{duration}s",
+                video_model=f"abra_i2v_{duration}s{model_suffix}",
                 preferred_installation=inst_id,
             )
 

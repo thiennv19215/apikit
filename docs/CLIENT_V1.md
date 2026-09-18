@@ -3,7 +3,9 @@
 Base URL: `https://apikit.shopcongngheso5.io.vn`
 Local Dev: `http://127.0.0.1:8100`
 
-Client gửi ảnh dạng **Base64 (`image_base64`)** trực tiếp trong request. **Phía Client V1 KHÔNG CÓ endpoint upload** (chức năng upload chỉ có ở tầng FlowKit Agent `/api/flow/upload-image` cho quy trình kịch bản nội bộ). Server tự động xử lý upload Base64 lên Google Flow, quản lý SHA-256 cache tránh upload trùng lặp, tự động cân bằng tải và phân bổ profile tài khoản.
+Client có thể gửi ảnh qua link trực tiếp **`image_url`** (từ CDN, S3, R2, web) hoặc **Base64 (`image_base64`)** trong request. Phân hệ Client V1 phân định rõ ràng theo tính chất tác vụ (không sử dụng cờ `wait`):
+- **Sinh Ảnh:** Luôn luôn **Đồng Bộ Trực Tiếp (Direct Sync 200 OK)**. Trả về trực tiếp `HTTP 200 OK` kèm link ảnh trong mảng `media` sau ~3–5s. Client không phải xếp hàng chờ đợi, không cần polling.
+- **Sinh Video:** Chuẩn **Asynchronous Job / Request-Poll Pattern**. Trả ngay `HTTP 200 OK` kèm `job_id`, `status="running"` sau ~1-2s (kèm headers `Location: /v1/jobs/{job_id}`, `Retry-After: 10`) để backend client tự polling qua `GET /v1/jobs/{job_id}`. Tránh rớt kết nối timeout khi render 30-90s.
 
 ---
 
@@ -14,24 +16,30 @@ Client gửi ảnh dạng **Base64 (`image_base64`)** trực tiếp trong reques
 | **System** | GET | `/v1/health` | Kiểm tra trạng thái hệ thống, khả năng nhận tác vụ và capabilities |
 | **Visual Styles** | GET | `/v1/materials` | Danh sách phong cách mỹ thuật ảnh (`realistic`, `3d_pixar`, `anime`...) |
 | | GET | `/v1/materials/{id}` | Chi tiết hướng dẫn prompt và phong cách của một style |
-| **Media Gen** | POST | `/v1/images/generations` | 202 Accepted, tạo tác vụ sinh ảnh Base64 (Nano Banana Pro / Banana 2) |
-| | POST | `/v1/images/generations/batch` | 202 Accepted, tạo nhiều tác vụ sinh ảnh Base64 theo lô (batch) |
-| | POST | `/v1/videos/generations` | 202 Accepted, tạo tác vụ sinh video Gemini Omni Flash (First frame, Start+End, R2V) |
-| | POST | `/v1/videos/generations/batch` | 202 Accepted, tạo nhiều tác vụ sinh video Omni Flash theo lô (batch) |
+| **Media Gen** | POST | `/v1/images/generations` | Sinh ảnh trực tiếp (URL hoặc Base64) bằng Banana Pro / Banana 2 (Đồng bộ 200 OK) |
+| | POST | `/v1/images/generations/batch` | Sinh nhiều ảnh theo lô đồng bộ (batch 200 OK) |
+| | POST | `/v1/images/edits` | Chỉnh sửa ảnh từ ảnh gốc (URL hoặc Base64) + prompt (Đồng bộ 200 OK) |
+| | POST | `/v1/images/upscale` | Phóng to nâng cấp ảnh lên 2K/4K (trả JSON hoặc file JPEG) |
+| | POST | `/v1/images/export` | Tải trực tiếp file JPEG nhị phân sau khi phóng to 2K/4K |
+| | POST | `/v1/videos/generations` | Sinh video Gemini Omni Flash (Text/I2V/Start+End/R2V, 360p/720p). Trả ngay `job_id` cho polling |
+| | POST | `/v1/videos/generations/batch` | Sinh nhiều video Omni Flash theo lô (batch). Trả danh sách `job_id` cho polling |
 | **Post-Process** | POST | `/v1/videos/concat` | Ghép nhiều clip video thành MP4 hoàn chỉnh bằng ffmpeg |
 | **Entities** | GET | `/v1/characters` | Liệt kê danh sách nhân vật/thực thể cố định |
 | | POST | `/v1/characters` | Tạo mới nhân vật kèm ảnh tham chiếu |
 | | GET | `/v1/characters/{id}` | Lấy thông tin chi tiết nhân vật |
-| **Jobs** | POST | `/v1/jobs/status` | Tra cứu trạng thái nhiều job |
-| | GET | `/v1/jobs/{job_id}` | Tra cứu trạng thái một job |
+| **Jobs** | GET | `/v1/jobs/{job_id}` | Polling tra cứu trạng thái/kết quả media của một job (Chuẩn GET) |
+| | GET | `/v1/jobs/status/{job_id}` | Alias tra cứu trạng thái một job qua GET |
+| | POST | `/v1/jobs/status` | Tra cứu trạng thái/lịch sử nhiều job qua JSON array |
 | | GET | `/v1/jobs/{job_id}/executions` | Lịch sử audit thực thi |
 
 > [!IMPORTANT]
 > **Quy định điều phối dành cho AI Agent & Client:**
-> - API Client V1 (`/v1/...`) hỗ trợ cả tạo tác vụ đơn lẻ (`/v1/.../generations`) và tạo hàng loạt theo lô qua Batch API (`/v1/images/generations/batch`, `/v1/videos/generations/batch`).
-> - **Cơ chế Batch tự động:** Khuyên dùng các endpoint Batch để gửi toàn bộ danh sách phân cảnh trong 1 request. Server backend tự động đưa vào hàng đợi SQLite queue và điều phối (tối đa 5 request song song, 10s cooldown, tự động failover quota đa tài khoản).
-> - **Tra cứu trạng thái:** Dùng `POST /v1/jobs/status` với danh sách `job_ids` để theo dõi tiến độ cả lô.
-> - **Không có endpoint Upload trên Client V1:** Truyền chuỗi Base64 trực tiếp vào trường `image_base64` của `input_images`. Server tự động hash SHA-256 cache và upload lên Flow.
+> - Không ép xếp hàng SQLite chờ 202; tác vụ được submit trực tiếp sang Google Flow.
+> - **Ảnh:** Luôn trả trực tiếp `HTTP 200 OK` kèm danh sách `media`. Không cần cờ `wait` hay polling.
+> - **Video:** Luôn trả ngay `HTTP 200 OK` với `job_id` và `status="running"` để backend client polling (tránh gateway timeout 30-90s).
+> - **Hỗ trợ URL & Base64:** Client có thể truyền link ảnh công khai (`image_url`) hoặc chuỗi Base64 (`image_base64`). Server tự động tải về, hash SHA-256 cache và xử lý với Google Flow.
+> - **Polling Duy Nhất Qua GET:** Sử dụng `GET /v1/jobs/{job_id}` để kiểm tra tiến độ và lấy URL file MP4 khi job hoàn thành.
+
 
 ---
 
@@ -170,13 +178,16 @@ Sau khi nhận kết quả, client có thể lấy danh sách `job_id` và dùng
 Tất cả các chế độ sinh video đều sử dụng chung endpoint `POST /v1/videos/generations`.
 Hệ thống **chỉ sử dụng Gemini Omni Flash** (tuyệt đối không dùng Veo) và tự động ánh xạ đúng Google Flow Batch RPC:
 
-| Chế độ | Google Batch RPC | Model Wire Key | Đầu vào (100% Base64) |
+| Chế độ | Google Batch RPC | Model Wire Key | Đầu vào |
 |---|---|---|---|
-| **1. First Frame** | `eb1hJf` | `abra_i2v_<duration>s` | 1 ảnh Base64 với role `start_frame` |
-| **2. Start + End Frame** | `nprQif` | `omni_flash_i2v_<duration>s_first_last` | 2 ảnh Base64 với role `start_frame` & `end_frame` |
-| **3. Reference-to-Video (R2V)** | `MZZa6b` | `abra_r2v_<duration>s` | 1–7 ảnh Base64 với role `reference` |
+| **0. Text to Video (T2V)** | `YhhmEf` | `omni_flash` (text) | Không cần ảnh (`input_images: []`), chỉ cần `prompt` |
+| **1. First Frame (I2V)** | `eb1hJf` | `abra_i2v_<duration>s[_360p]` | 1 ảnh Base64 với role `start_frame` |
+| **2. Start + End Frame** | `nprQif` | `omni_flash_i2v_<duration>s_first_last[_360p]` | 2 ảnh Base64 với role `start_frame` & `end_frame` |
+| **3. Reference-to-Video (R2V)** | `MZZa6b` | `abra_r2v_<duration>s[_360p]` | 1–7 ảnh Base64 với role `reference` |
 
-Thời lượng hỗ trợ: `4`, `6`, `8`, `10` giây (mặc định 8s). Tỉ lệ hỗ trợ: `9:16` (Portrait - mặc định) hoặc `16:9` (Landscape).
+Thời lượng hỗ trợ: `4`, `6`, `8`, `10` giây (mặc định 8s).
+Độ phân giải: `"720p"` (mặc định) hoặc `"360p"`.
+Tỉ lệ hỗ trợ: `9:16` (Portrait - mặc định) hoặc `16:9` (Landscape).
 
 ---
 
@@ -556,16 +567,15 @@ async function generateOmniVideo(imagePath: string, prompt: string): Promise<str
   const jobId = data.jobs[0].id;
   console.log(`Job queued: ${jobId}. Polling...`);
 
-  // 2. Poll kết quả
+  // 2. Poll kết quả (Response tối giản, lấy URL trực tiếp)
   while (true) {
     await new Promise((r) => setTimeout(r, 10000));
     const pollRes = await fetch(`${BASE_URL}/v1/jobs/${jobId}`);
-    const pollData = await pollRes.json();
-    const job = pollData.jobs[0];
+    const job = await pollRes.json();
 
     if (job.status === "complete") {
-      console.log("Success! Video URL:", job.media[0].url);
-      return job.media[0].url;
+      console.log("Success! Video URL:", job.url || job.media[0]?.url);
+      return job.url || job.media[0]?.url;
     } else if (job.status === "failed") {
       throw new Error(`Generation failed: ${JSON.stringify(job.error)}`);
     }
@@ -581,9 +591,9 @@ async function generateOmniVideo(imagePath: string, prompt: string): Promise<str
 1. **Gửi ảnh trực tiếp dạng Base64:**
    - Client V1 **không cần endpoint upload**. Truyền trực tiếp chuỗi Base64 qua trường `image_base64`.
    - **Tuyệt đối không truyền `media_id`** (UUID nội bộ của Google Flow). Nếu truyền direct media IDs, API sẽ trả về lỗi `HTTP 422 Unprocessable Entity`.
-2. **Cơ chế Bất đồng bộ (Async Job):**
-   - API trả về HTTP `202 Accepted` ngay lập tức kèm `job_id`.
-   - Thời gian sinh video Omni Flash thường mất từ **60 giây đến 180 giây**. Khuyến nghị poll mỗi **10 giây**.
+2. **Cơ chế Bất đồng bộ Video (Request-Poll Pattern):**
+   - API trả về HTTP `200 OK` ngay lập tức kèm `job_id`, `status="running"`, `phase="polling"` và headers `Location: /v1/jobs/{job_id}`, `Retry-After: 10`.
+   - Polling kết quả qua `GET /v1/jobs/{job_id}` mỗi 5–10 giây cho đến khi `status="complete"`.
 3. **Mô hình Video:**
    - Chỉ hỗ trợ model `"omni_flash"`. Tuyệt đối không dùng Veo qua Client V1.
 4. **Mã lỗi thường gặp:**

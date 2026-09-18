@@ -33,6 +33,10 @@ from agent.services.headers import random_headers
 
 logger = logging.getLogger(__name__)
 
+IMAGE_UI_SUBMIT_OFFSETS_S = (0.0, 0.5, 1.5, 2.5)
+IMAGE_TRANSIENT_RETRY_DELAY_S = 34.0
+IMAGE_TRANSIENT_MAX_ATTEMPTS = 2
+
 
 def is_quota_error(error_msg: object) -> bool:
     """Return True if error indicates Google Flow user quota or credit exhaustion."""
@@ -169,6 +173,7 @@ class FlowClient:
                 "Extension profile marked QUOTA EXHAUSTED: installation=%s profile=%s (unavailable for %.0fs)",
                 sess.get("installation_id"),
                 sess.get("profile_name"),
+                duration,
             )
 
     def reset_quota_status(self, installation_id: str | None = None) -> int:
@@ -237,10 +242,8 @@ class FlowClient:
             )
             is_single_ext = len(self._extensions) <= 1
             available = (
-                is_single_ext or (
-                    session.get("unavailable_until", 0) <= now
-                    and not session.get("quota_exhausted", False)
-                )
+                session.get("unavailable_until", 0) <= now
+                and (not session.get("quota_exhausted", False) or is_single_ext)
             )
             if not available and not allow_exhausted:
                 continue
@@ -919,7 +922,9 @@ class FlowClient:
                                character_media_ids: list[str] = None,
                                image_model: str = None,
                                preferred_installation: str | None = None,
-                               count: int = 1) -> dict:
+                               count: int = 1,
+                               seed: int | None = None,
+                               base_media_id: str | None = None) -> dict:
         """Generate image(s).
 
         ``character_media_ids`` are attached as reference images, which is what
@@ -946,6 +951,8 @@ class FlowClient:
                 prompt, pid, count=safe_count, aspect=aspect_ratio,
                 model=self._batch_image_model(image_model),
                 ref_media_ids=list(character_media_ids or []) or None,
+                base_media_id=base_media_id,
+                seed=seed,
             )
             payload = await self._batch_payload(
                 fb.RPC_GEN_IMAGE, freq, fb.CAPTCHA_IMAGE,
@@ -969,29 +976,62 @@ class FlowClient:
                           aspect_ratio: str = "IMAGE_ASPECT_RATIO_PORTRAIT",
                           user_paygate_tier: str = "PAYGATE_TIER_ONE",
                           character_media_ids: list[str] = None,
+                          image_model: str = None,
+                          count: int = 1,
+                          seed: int = None,
                           preferred_installation: str | None = None) -> dict:
-        """Regenerate from an existing image plus any entity references.
-
-        The REST path had a dedicated base-image input type; the new payload's
-        reference slot was captured but a base-image variant of it was not, so
-        here the source rides in as the first reference. In practice that
-        conditions the result on the source rather than editing it in place —
-        good enough for continuation scenes, not identical to the old edit.
-        Capturing the real slot is the fix; see docs/CAPTURE.md.
-        """
+        """Regenerate from an existing base image plus any entity references."""
         if not USE_BATCH_RPC:
             return await self._legacy_edit_image(
                 prompt, source_media_id, project_id, aspect_ratio,
                 user_paygate_tier, character_media_ids)
 
-        refs = [source_media_id] + [
+        refs = [
             mid for mid in (character_media_ids or []) if mid != source_media_id
         ]
         return await self.generate_images(
             prompt=prompt, project_id=project_id, aspect_ratio=aspect_ratio,
             user_paygate_tier=user_paygate_tier, character_media_ids=refs,
+            image_model=image_model, count=count, seed=seed,
+            base_media_id=source_media_id,
             preferred_installation=preferred_installation,
         )
+
+    async def upscale_image(self, media_id: str, project_id: str | None = None,
+                            resolution: str = "2K", preferred_installation: str | None = None) -> dict:
+        """Return Flow's synchronous 2K/4K image upscale as base64 JPEG data."""
+        cand_ws = self._select_extension(
+            require_token=False,
+            preferred_installation=preferred_installation,
+            preferred_project_id=project_id or None,
+        )
+        target_inst = preferred_installation or (
+            self._extensions[cand_ws].get("installation_id") if cand_ws in self._extensions else None
+        )
+        try:
+            pid = self._batch_project_id(project_id, preferred_installation=target_inst)
+            freq = fb.image_upscale_request(media_id, resolution)
+            payload = await self._batch_payload(
+                fb.RPC_UPSCALE_IMAGE,
+                freq,
+                fb.CAPTCHA_IMAGE,
+                preferred_installation=target_inst,
+                timeout=150,
+            )
+            encoded = fb.read_upscaled_image(payload)
+        except Exception as e:
+            return _batch_error(e)
+        return {
+            "status": 200,
+            "data": {
+                "media_id": media_id,
+                "project_id": pid,
+                "resolution": str(resolution).upper(),
+                "encodedImage": encoded,
+                "contentType": "image/jpeg",
+            },
+            "_installation_id": target_inst,
+        }
 
     async def generate_video(self, start_image_media_id: str, prompt: str,
                               project_id: str, scene_id: str,
@@ -1092,6 +1132,20 @@ class FlowClient:
         self._remember_operation(operation.operation_id, pid, installation_id=target_inst)
         return {"status": 200, "data": {"operations": [_as_pending_operation(operation.operation_id)]},
                 "_installation_id": target_inst}
+
+    async def generate_text_video(self, prompt: str, project_id: str,
+                                  duration_s: int = 8,
+                                  aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
+                                  preferred_installation: str | None = None) -> dict:
+        """Submit text-to-video using Omni Flash via batch RPC YhhmEf."""
+        from agent.services import omni_flash
+        return await omni_flash.generate_omni_flash_text_video(
+            prompt=prompt,
+            project_id=project_id,
+            duration_s=duration_s,
+            aspect_ratio=aspect_ratio,
+            preferred_installation=preferred_installation,
+        )
 
     async def upscale_video(self, media_id: str, scene_id: str,
                              aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",

@@ -1,28 +1,36 @@
 from __future__ import annotations
 
+import asyncio
+import base64
 import json
 import logging
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException, Response, status
+import aiohttp
+from fastapi import APIRouter, Header, HTTPException, Query, Response, status
 from fastapi.responses import JSONResponse
 
 from agent.api.v1.schemas import (
     BatchImageGenerationRequest,
     BatchVideoGenerationRequest,
     GeneratedMedia,
+    ImageEditRequest,
     ImageGenerationRequest,
+    ImageUpscaleRequest,
     Job,
     JobError,
     JobMetadata,
     JobsResponse,
+    JobPollResponse,
     JobStatusRequest,
     VideoGenerationRequest,
+    normalize_image_model,
 )
 from agent.db import crud
 from agent.db.schema import get_db, _db_lock
 from agent.services.flow_client import get_flow_client
+from agent.worker._parsing import _extract_media_items
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +39,11 @@ router = APIRouter(tags=["Client API v1"])
 
 def _wake_worker() -> None:
     """Start queued v1 work immediately when the worker has capacity."""
-    from agent.worker.processor import get_worker_controller
-    get_worker_controller().notify_work_available()
+    try:
+        from agent.worker.processor import get_worker_controller
+        get_worker_controller().notify_work_available()
+    except Exception:
+        pass
 
 
 def _resolve_idempotency_key(header_key: str | None, body_key: str | None) -> str | None:
@@ -151,7 +162,17 @@ def _build_job_item(req: dict) -> Job:
 
     job_error: JobError | None = None
     err_msg = req.get("error_message")
-    op_id = req.get("request_id")
+    op_id = req.get("media_id") or req.get("request_id")
+    if not op_id or op_id == jid:
+        try:
+            if req.get("payload_json"):
+                ops = json.loads(req["payload_json"]).get("operations", [])
+                if ops and isinstance(ops[0], dict):
+                    extracted_op = ops[0].get("name") or ops[0].get("operation", {}).get("name")
+                    if extracted_op:
+                        op_id = extracted_op
+        except Exception:
+            pass
     if raw_status == "FAILED":
         msg = err_msg or "Generation failed"
         if "media not found" in msg.lower() or "từ chối tạo video" in msg.lower():
@@ -178,22 +199,13 @@ def _build_job_item(req: dict) -> Job:
                 from agent.config import VIDEO_POLL_TIMEOUT
                 if elapsed > VIDEO_POLL_TIMEOUT:
                     job_status = "failed"
-                    if op_id:
-                        timeout_msg = f"Đã gửi job thành công (Operation ID: {op_id}) nhưng quá thời gian chờ Google Flow render ({int(elapsed)}s)."
-                    else:
-                        timeout_msg = f"Google Flow không trả về video sau {int(elapsed)}s (có thể tác vụ bị từ chối hoặc quá tải)."
                     job_error = JobError(
                         code="TIMEOUT",
-                        message=timeout_msg,
-                        details=err_msg or "Generation exceeded timeout",
+                        message=f"Generation timed out after {int(elapsed)}s",
+                        details=f"Exceeded VIDEO_POLL_TIMEOUT ({VIDEO_POLL_TIMEOUT}s)",
                     )
-            except Exception as exc:
-                job_status = "failed"
-                job_error = JobError(
-                    code="SYSTEM_STATE_INVALID",
-                    message="The job state could not be read safely.",
-                    details=f"Invalid job timestamp: {type(exc).__name__}",
-                )
+            except Exception:
+                pass
 
     phase = "queued" if job_status == "queued" else ("polling" if op_id else "submitting")
     if job_status == "complete":
@@ -265,213 +277,677 @@ async def _resolve_jobs_response(job_ids: list[str]) -> JobsResponse:
     )
 
 
+async def _resolve_single_job_response(job_id: str) -> JobPollResponse:
+    req = await crud.get_request(job_id)
+    if not req:
+        return JobPollResponse(
+            job_id=job_id,
+            id=job_id,
+            status="failed",
+            type="video",
+            url=None,
+            media=[],
+            error=JobError(
+                code="JOB_NOT_FOUND",
+                message=f"Job {job_id} not found.",
+            ),
+        )
 
-@router.post("/v1/images/generations", response_model=JobsResponse, status_code=status.HTTP_202_ACCEPTED)
+    item = _build_job_item(req)
+    primary_url = item.media[0].url if item.media else req.get("output_url")
+    return JobPollResponse(
+        job_id=item.id,
+        id=item.id,
+        status=item.status,
+        type=item.type,
+        url=primary_url,
+        media=item.media,
+        error=item.error,
+        installation_id=item.installation_id,
+    )
+
+
+async def _fetch_url_as_base64(url: str) -> tuple[str, str]:
+    """Fetch an image from URL and return (base64_str, mime_type)."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                if resp.status != 200:
+                    raise HTTPException(status_code=400, detail=f"Failed to fetch image from URL: {url} (HTTP {resp.status})")
+                content_type = resp.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
+                data = await resp.read()
+                return base64.b64encode(data).decode(), content_type
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise
+        raise HTTPException(status_code=400, detail=f"Error downloading image from {url}: {e}")
+
+
+async def _resolve_media_id_from_input(
+    client,
+    *,
+    media_id: str | None = None,
+    image_base64: str | None = None,
+    image_url: str | None = None,
+    mime_type: str = "image/jpeg",
+    project_id: str = "",
+    preferred_installation: str | None = None,
+) -> tuple[str, str | None]:
+    """Resolve an input image into a Google Flow media_id, uploading if necessary."""
+    if media_id:
+        return media_id, preferred_installation
+    if image_url and not image_base64:
+        image_base64, mime_type = await _fetch_url_as_base64(image_url)
+    if image_base64:
+        res = await client.upload_image(
+            image_base64=image_base64,
+            mime_type=mime_type or "image/jpeg",
+            project_id=project_id,
+            preferred_installation=preferred_installation,
+        )
+        if res.get("error"):
+            raise HTTPException(status_code=502, detail=f"Failed to upload image to Google Flow: {res.get('error')}")
+        mid = res.get("_mediaId") or res.get("name") or res.get("media_id") or res.get("data", {}).get("media", {}).get("name")
+        inst_id = res.get("_installation_id") or preferred_installation
+        if not mid:
+            raise HTTPException(status_code=502, detail="Failed to obtain media_id from Google Flow upload")
+        return mid, inst_id
+    raise HTTPException(status_code=400, detail="No image provided (must provide image_base64, image_url, or media_id)")
+
+
+async def _poll_video_result(client, submit_result: dict, timeout: int = 120) -> dict:
+    """Poll a video generation result synchronously until completed or timeout."""
+    data = submit_result.get("data", submit_result)
+    polling_info = data.get("flowkitPolling", {}) if isinstance(data, dict) else {}
+    mode = polling_info.get("mode")
+
+    if mode == "batch_media":
+        from agent.services.omni_flash import _check_omni_batch_media
+        workflows = polling_info.get("workflows") or data.get("workflows") or []
+        start_time = asyncio.get_event_loop().time()
+        poll_interval = 4
+        while (asyncio.get_event_loop().time() - start_time) < timeout:
+            await asyncio.sleep(poll_interval)
+            check = await _check_omni_batch_media(workflows, project_id=polling_info.get("project_id", ""))
+            if check.get("done"):
+                for wf in check.get("workflows", []):
+                    m = wf.get("media", {})
+                    if m.get("url"):
+                        return {"status": 200, "media_id": m.get("media_id"), "url": m.get("url")}
+                break
+        raise HTTPException(status_code=504, detail=f"Omni Flash video generation timed out after {timeout}s")
+
+    # Mode: batch_operation or standard operations
+    operations = submit_result.get("operations") or (data.get("operations", []) if isinstance(data, dict) else [])
+    if not operations and "operation" in submit_result:
+        operations = [submit_result]
+    if not operations and isinstance(data, dict) and "operation" in data:
+        operations = [data]
+    if not operations:
+        raise HTTPException(status_code=502, detail="No operations returned from video generation")
+
+    # If already marked successful (e.g. mock or immediate completion)
+    first_op = operations[0]
+    if first_op.get("status") == "MEDIA_GENERATION_STATUS_SUCCESSFUL":
+        op_meta = first_op.get("operation", {}).get("metadata", {}).get("video", {})
+        url = op_meta.get("fifeUrl") or op_meta.get("url") or first_op.get("url") or ""
+        mid = op_meta.get("mediaId") or first_op.get("media_id") or ""
+        if url:
+            return {"status": 200, "media_id": mid, "url": url}
+
+    from agent.sdk.services.operations import _poll_operations
+    from agent.sdk.services.result_handler import parse_result
+
+    poll_res = await _poll_operations(client, operations, timeout=timeout)
+    if poll_res.get("error"):
+        raise HTTPException(status_code=502, detail=f"Video generation error: {poll_res.get('error')}")
+
+    gen_res = parse_result(poll_res, "GENERATE_VIDEO")
+    if not gen_res.success:
+        raise HTTPException(status_code=502, detail=f"Video generation failed: {gen_res.error}")
+
+    return {"status": 200, "media_id": gen_res.media_id, "url": gen_res.url}
+
+
+async def _background_monitor_video(
+    job_id: str,
+    client,
+    submit_result: dict,
+    orientation: str,
+    req_type: str,
+    payload_dict: dict,
+    target_inst: str | None,
+) -> None:
+    try:
+        poll_res = await _poll_video_result(client, submit_result, timeout=180)
+        video_url = poll_res.get("url")
+        video_mid = poll_res.get("media_id") or job_id
+        if video_url:
+            media_items = [{"media_id": video_mid, "url": video_url}]
+            payload_dict["generated_media"] = media_items
+            db = await get_db()
+            async with _db_lock:
+                await db.execute(
+                    """
+                    UPDATE request
+                    SET status = 'COMPLETED', media_id = ?, output_url = ?, payload_json = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+                    WHERE id = ?
+                    """,
+                    (video_mid, video_url, json.dumps(payload_dict), job_id),
+                )
+                await db.commit()
+            logger.info("Background monitor completed video Job %s (url=%s)", job_id, video_url[:60])
+        else:
+            await crud.update_request(job_id, status="FAILED", error_message="Video rendering returned no URL")
+    except Exception as exc:
+        logger.exception("Background monitor failed for video Job %s: %s", job_id, exc)
+        await crud.update_request(job_id, status="FAILED", error_message=str(exc))
+
+
+@router.post("/v1/images/generations", response_model=JobsResponse, status_code=status.HTTP_200_OK)
 async def generate_image(
     payload: ImageGenerationRequest,
     idempotency_header: str | None = Header(default=None, alias="Idempotency-Key", min_length=1, max_length=200),
 ):
-    """Submit image generation task (accepts text prompt and optional Base64 reference images)."""
-    idempotency_key = _resolve_idempotency_key(idempotency_header, payload.idempotency_key)
+    """Generate images directly with Banana Pro / Banana 2 (synchronous 200 OK)."""
+    client = get_flow_client()
+    if not getattr(client, "connected", False) and not getattr(client, "list_extensions", lambda: [])():
+        raise HTTPException(status_code=503, detail="Flow extension is not connected")
+
+    header_val = idempotency_header if isinstance(idempotency_header, str) else None
+    idempotency_key = _resolve_idempotency_key(header_val, payload.idempotency_key)
+    db = await get_db()
+    if idempotency_key:
+        async with _db_lock:
+            existing_id = await _find_idempotent_job(db, idempotency_key, "GENERATE_IMAGE")
+            if existing_id:
+                return await _resolve_jobs_response([existing_id])
+
     job_id = f"job_{uuid.uuid4().hex[:16]}"
     aspect = _normalize_image_aspect(payload.aspect_ratio)
     orientation = "HORIZONTAL" if "LANDSCAPE" in aspect else "VERTICAL"
+    model = normalize_image_model(payload.model or "NANO_BANANA_PRO")
+    inst_id = payload.installation_id
+    pid = payload.project_id or ""
+
+    ref_media_ids = []
+    if payload.input_images:
+        for img in payload.input_images:
+            mid, inst_id = await _resolve_media_id_from_input(
+                client,
+                media_id=img.media_id,
+                image_base64=img.image_base64,
+                image_url=img.image_url,
+                mime_type=img.mime_type,
+                project_id=pid,
+                preferred_installation=inst_id,
+            )
+            if mid:
+                ref_media_ids.append(mid)
 
     payload_dict = {
         "prompt": payload.prompt,
         "idempotency_key": idempotency_key,
-        "installation_id": payload.installation_id,
+        "installation_id": inst_id,
         "aspect_ratio": aspect,
-        "input_images": [img.model_dump() for img in (payload.input_images or [])],
-        "model": payload.model,
+        "model": model,
         "count": payload.count,
-        "project_id": payload.project_id,
-        "reference_media_ids": payload.reference_media_ids,
+        "project_id": pid,
+        "generated_media": [],
     }
 
-    db = await get_db()
+    res = await client.generate_images(
+        prompt=payload.prompt,
+        project_id=pid,
+        aspect_ratio=aspect,
+        character_media_ids=ref_media_ids if ref_media_ids else None,
+        image_model=model,
+        preferred_installation=inst_id,
+        count=payload.count,
+    )
+
+    if res.get("error") or (isinstance(res.get("status"), int) and res["status"] >= 400):
+        code = res.get("status", 502) if isinstance(res.get("status"), int) and res.get("status") >= 400 else 502
+        raise HTTPException(status_code=code, detail=res.get("error") or "Image generation failed")
+
+    media_items = _extract_media_items(res, "GENERATE_IMAGE")
+    if not media_items:
+        data = res.get("data", res)
+        if isinstance(data, dict) and data.get("url"):
+            media_items = [{"media_id": data.get("media_id") or job_id, "url": data["url"]}]
+        else:
+            raise HTTPException(status_code=502, detail="Image generation succeeded but returned no media items")
+
+    primary_media = media_items[0]
+    target_inst = res.get("_installation_id") or inst_id
+    payload_dict["installation_id"] = target_inst
+    payload_dict["generated_media"] = media_items
+
     async with _db_lock:
-        existing_id = await _find_idempotent_job(db, idempotency_key, "GENERATE_IMAGE")
-        if existing_id:
-            return await _resolve_jobs_response([existing_id])
         await db.execute(
             """
-            INSERT INTO request (id, type, orientation, status, payload_json, created_at, updated_at)
-            VALUES (?, ?, ?, 'PENDING', ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            INSERT INTO request (id, type, orientation, status, media_id, output_url, installation_id, payload_json, created_at, updated_at)
+            VALUES (?, 'GENERATE_IMAGE', ?, 'COMPLETED', ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
             """,
-            (job_id, "GENERATE_IMAGE", orientation, json.dumps(payload_dict)),
+            (job_id, orientation, primary_media.get("media_id"), primary_media.get("url"), target_inst, json.dumps(payload_dict)),
         )
         await db.commit()
 
-    _wake_worker()
-    logger.info("v1 Client API queued Image Job %s (orientation=%s)", job_id, orientation)
+    logger.info("v1 Client API direct Image Job %s completed", job_id)
     return await _resolve_jobs_response([job_id])
 
 
-@router.post("/v1/images/generations/batch", response_model=JobsResponse, status_code=status.HTTP_202_ACCEPTED)
-async def generate_images_batch(payload: BatchImageGenerationRequest | list[ImageGenerationRequest]):
-    """Submit batch image generation tasks atomically. Accepts BatchImageGenerationRequest or list[ImageGenerationRequest]."""
+@router.post("/v1/images/generations/batch", response_model=JobsResponse, status_code=status.HTTP_200_OK)
+async def generate_images_batch(
+    payload: BatchImageGenerationRequest | list[ImageGenerationRequest],
+):
+    """Submit batch image generation tasks directly (synchronous 200 OK)."""
     items = payload.requests if isinstance(payload, BatchImageGenerationRequest) else payload
     if not items:
         raise HTTPException(status_code=422, detail="Requests list cannot be empty")
 
     job_ids: list[str] = []
-    records = []
-    seen_keys: set[str] = set()
-    db = await get_db()
-    async with _db_lock:
-        for item in items:
-            if item.idempotency_key and item.idempotency_key in seen_keys:
-                raise HTTPException(status_code=409, detail=f"Duplicate idempotency_key in batch: {item.idempotency_key}")
-            if item.idempotency_key:
-                seen_keys.add(item.idempotency_key)
-            existing_id = await _find_idempotent_job(db, item.idempotency_key, "GENERATE_IMAGE")
-            if existing_id:
-                job_ids.append(existing_id)
-                continue
-            job_id = f"job_{uuid.uuid4().hex[:16]}"
-            aspect = _normalize_image_aspect(item.aspect_ratio)
-            orientation = "HORIZONTAL" if "LANDSCAPE" in aspect else "VERTICAL"
-            payload_dict = {
-                "prompt": item.prompt,
-                "idempotency_key": item.idempotency_key,
-                "installation_id": item.installation_id,
-                "aspect_ratio": aspect,
-                "input_images": [img.model_dump() for img in (item.input_images or [])],
-                "model": item.model,
-                "count": item.count,
-                "project_id": item.project_id,
-                "reference_media_ids": item.reference_media_ids,
-            }
-            records.append((job_id, "GENERATE_IMAGE", orientation, json.dumps(payload_dict)))
-            job_ids.append(job_id)
+    for item in items:
+        resp = await generate_image(item)
+        if resp.jobs:
+            job_ids.append(resp.jobs[0].id)
 
-        for rec in records:
-            await db.execute(
-                """
-                INSERT INTO request (id, type, orientation, status, payload_json, created_at, updated_at)
-                VALUES (?, ?, ?, 'PENDING', ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-                """,
-                rec,
-            )
-        await db.commit()
-
-    _wake_worker()
-    logger.info("v1 Client API queued %d Image Jobs in batch", len(job_ids))
     return await _resolve_jobs_response(job_ids)
 
 
-@router.post("/v1/videos/generations", response_model=JobsResponse, status_code=status.HTTP_202_ACCEPTED)
+@router.post("/v1/videos/generations", response_model=JobsResponse, status_code=status.HTTP_200_OK)
 async def generate_video(
     payload: VideoGenerationRequest,
+    response: Response = Response(),
     idempotency_header: str | None = Header(default=None, alias="Idempotency-Key", min_length=1, max_length=200),
 ):
-    """Submit video generation task (accepts Base64 input_images for i2v or r2v)."""
-    idempotency_key = _resolve_idempotency_key(idempotency_header, payload.idempotency_key)
+    """Generate videos with Omni Flash (asynchronous 200 OK, returns job_id for polling)."""
+    client = get_flow_client()
+    if not getattr(client, "connected", False) and not getattr(client, "list_extensions", lambda: [])():
+        raise HTTPException(status_code=503, detail="Flow extension is not connected")
+    header_val = idempotency_header if isinstance(idempotency_header, str) else None
+    idempotency_key = _resolve_idempotency_key(header_val, payload.idempotency_key)
+    is_ref_based = payload.type in ("reference_to_video", "ingredients", "references", "omni", "r2v")
+    req_type = "GENERATE_VIDEO_REFS" if is_ref_based else "GENERATE_VIDEO"
+
+    db = await get_db()
+    if idempotency_key:
+        async with _db_lock:
+            existing_id = await _find_idempotent_job(db, idempotency_key, req_type)
+            if existing_id:
+                return await _resolve_jobs_response([existing_id])
+
     job_id = f"job_{uuid.uuid4().hex[:16]}"
     aspect = _normalize_video_aspect(payload.aspect_ratio)
     orientation = "HORIZONTAL" if "LANDSCAPE" in aspect else "VERTICAL"
+    duration = payload.duration_seconds
+    resolution = getattr(payload, "resolution", "720p") or "720p"
+    seed = getattr(payload, "seed", None)
+    inst_id = payload.installation_id
+    pid = payload.project_id or ""
 
-    is_ref_based = payload.type in ("reference_to_video", "ingredients", "references", "omni", "r2v")
-    req_type = "GENERATE_VIDEO_REFS" if is_ref_based else "GENERATE_VIDEO"
+    is_t2v = payload.type in ("text_to_video", "t2v", "text")
+    start_mid = payload.start_media_id
+    end_mid = payload.end_media_id
+    ref_mids = list(payload.reference_media_ids or [])
+
+    if not is_t2v and payload.input_images:
+        for idx, img in enumerate(payload.input_images):
+            mid, inst_id = await _resolve_media_id_from_input(
+                client,
+                media_id=img.media_id,
+                image_base64=img.image_base64,
+                image_url=img.image_url,
+                mime_type=img.mime_type,
+                project_id=pid,
+                preferred_installation=inst_id,
+            )
+            role = img.role
+            if role == "start_frame" or (idx == 0 and not start_mid and role != "reference"):
+                start_mid = mid
+            elif role == "end_frame" or (idx == 1 and start_mid and not end_mid and len(payload.input_images) == 2 and role != "reference"):
+                end_mid = mid
+            else:
+                ref_mids.append(mid)
+
+    # Check if client has mock/override method, else call omni_flash service functions
+    from agent.services import omni_flash
+
+    if is_t2v:
+        if hasattr(client, "generate_text_video"):
+            submit_result = await client.generate_text_video(
+                prompt=payload.prompt,
+                project_id=pid,
+                duration_s=duration,
+                aspect_ratio=aspect,
+                seed=seed,
+                preferred_installation=inst_id,
+            )
+        else:
+            submit_result = await omni_flash.generate_omni_flash_text_video(
+                prompt=payload.prompt,
+                project_id=pid,
+                duration_s=duration,
+                aspect_ratio=aspect,
+                seed=seed,
+                preferred_installation=inst_id,
+            )
+    elif start_mid and end_mid:
+        if hasattr(client, "generate_video"):
+            submit_result = await client.generate_video(
+                start_image_media_id=start_mid,
+                end_image_media_id=end_mid,
+                prompt=payload.prompt,
+                project_id=pid,
+                scene_id="",
+                aspect_ratio=aspect,
+            )
+        else:
+            submit_result = await omni_flash.generate_omni_flash_first_last_video(
+                start_image_media_id=start_mid,
+                end_image_media_id=end_mid,
+                prompt=payload.prompt,
+                project_id=pid,
+                duration_s=duration,
+                resolution=resolution,
+                aspect_ratio=aspect,
+                seed=seed,
+                preferred_installation=inst_id,
+            )
+    elif start_mid and not ref_mids:
+        if hasattr(client, "generate_video"):
+            submit_result = await client.generate_video(
+                start_image_media_id=start_mid,
+                prompt=payload.prompt,
+                project_id=pid,
+                scene_id="",
+                aspect_ratio=aspect,
+            )
+        else:
+            submit_result = await omni_flash.generate_omni_flash_first_frame_video(
+                start_image_media_id=start_mid,
+                prompt=payload.prompt,
+                project_id=pid,
+                duration_s=duration,
+                resolution=resolution,
+                aspect_ratio=aspect,
+                seed=seed,
+                preferred_installation=inst_id,
+            )
+    elif ref_mids:
+        all_refs = ([start_mid] if start_mid else []) + ref_mids
+        if hasattr(client, "generate_video_from_references"):
+            submit_result = await client.generate_video_from_references(
+                reference_media_ids=all_refs,
+                prompt=payload.prompt,
+                project_id=pid,
+                scene_id="",
+                aspect_ratio=aspect,
+            )
+        else:
+            submit_result = await omni_flash.generate_omni_flash_video(
+                reference_media_ids=all_refs,
+                prompt=payload.prompt,
+                project_id=pid,
+                duration_s=duration,
+                resolution=resolution,
+                aspect_ratio=aspect,
+                preferred_installation=inst_id,
+            )
+    else:
+        if hasattr(client, "generate_text_video"):
+            submit_result = await client.generate_text_video(
+                prompt=payload.prompt,
+                project_id=pid,
+                duration_s=duration,
+                aspect_ratio=aspect,
+                seed=seed,
+                preferred_installation=inst_id,
+            )
+        else:
+            submit_result = await omni_flash.generate_omni_flash_text_video(
+                prompt=payload.prompt,
+                project_id=pid,
+                duration_s=duration,
+                aspect_ratio=aspect,
+                seed=payload.seed,
+                preferred_installation=inst_id,
+            )
+
+    if submit_result.get("error") or (isinstance(submit_result.get("status"), int) and submit_result["status"] >= 400):
+        code = submit_result.get("status", 502) if isinstance(submit_result.get("status"), int) and submit_result.get("status") >= 400 else 502
+        raise HTTPException(status_code=code, detail=submit_result.get("error") or "Video submission failed")
+
+    target_inst = submit_result.get("_installation_id") or inst_id
+    operations = submit_result.get("operations") or (submit_result.get("data", {}).get("operations", []) if isinstance(submit_result.get("data"), dict) else [])
+    if not operations and "operation" in submit_result:
+        operations = [submit_result]
+    if not operations and isinstance(submit_result.get("data"), dict) and "operation" in submit_result["data"]:
+        operations = [submit_result["data"]]
+
+    op_id = None
+    if operations and isinstance(operations[0], dict):
+        op_id = operations[0].get("name") or operations[0].get("operation", {}).get("name")
 
     payload_dict = {
         "prompt": payload.prompt,
         "idempotency_key": idempotency_key,
-        "installation_id": payload.installation_id,
+        "installation_id": target_inst,
         "type": payload.type,
-        "generation_type": payload.generation_type or payload.type,
-        "input_images": [img.model_dump() for img in payload.input_images],
         "aspect_ratio": aspect,
-        "duration_seconds": payload.duration_seconds,
-        "project_id": payload.project_id,
-        "start_media_id": payload.start_media_id,
-        "end_media_id": payload.end_media_id,
-        "reference_media_ids": payload.reference_media_ids,
-        "model": payload.model or payload.mode or payload.model_family or payload.quality or "omni_flash",
-        "quality": payload.quality,
-        "dialogue": payload.dialogue,
+        "duration_seconds": duration,
+        "resolution": resolution,
+        "project_id": pid,
+        "operations": operations,
+        "generated_media": [],
     }
 
-    db = await get_db()
+    # Polling mode: record as PROCESSING and monitor in background
     async with _db_lock:
-        existing_id = await _find_idempotent_job(db, idempotency_key, req_type)
-        if existing_id:
-            return await _resolve_jobs_response([existing_id])
         await db.execute(
             """
-            INSERT INTO request (id, type, orientation, status, payload_json, created_at, updated_at)
-            VALUES (?, ?, ?, 'PENDING', ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            INSERT INTO request (id, type, orientation, status, media_id, output_url, installation_id, payload_json, created_at, updated_at)
+            VALUES (?, ?, ?, 'PROCESSING', ?, NULL, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
             """,
-            (job_id, req_type, orientation, json.dumps(payload_dict)),
+            (job_id, req_type, orientation, op_id or job_id, target_inst, json.dumps(payload_dict)),
         )
         await db.commit()
 
-    _wake_worker()
-    logger.info("v1 Client API queued Video Job %s (type=%s, orientation=%s)", job_id, payload.type, orientation)
+    asyncio.create_task(
+        _background_monitor_video(
+            job_id=job_id,
+            client=client,
+            submit_result=submit_result,
+            orientation=orientation,
+            req_type=req_type,
+            payload_dict=payload_dict,
+            target_inst=target_inst,
+        )
+    )
+    logger.info("v1 Client API Video Job %s submitted for polling (op=%s)", job_id, op_id)
+    if response is not None:
+        response.headers["Location"] = f"/v1/jobs/{job_id}"
+        response.headers["Retry-After"] = "10"
     return await _resolve_jobs_response([job_id])
 
 
-@router.post("/v1/videos/generations/batch", response_model=JobsResponse, status_code=status.HTTP_202_ACCEPTED)
-async def generate_videos_batch(payload: BatchVideoGenerationRequest | list[VideoGenerationRequest]):
-    """Submit batch video generation tasks atomically. Accepts BatchVideoGenerationRequest or list[VideoGenerationRequest]."""
+@router.post("/v1/videos/generations/batch", response_model=JobsResponse, status_code=status.HTTP_200_OK)
+async def generate_videos_batch(
+    payload: BatchVideoGenerationRequest | list[VideoGenerationRequest],
+):
+    """Submit batch video generation tasks (returns job_ids for polling)."""
     items = payload.requests if isinstance(payload, BatchVideoGenerationRequest) else payload
     if not items:
         raise HTTPException(status_code=422, detail="Requests list cannot be empty")
 
     job_ids: list[str] = []
-    records = []
-    seen_keys: set[str] = set()
-    db = await get_db()
-    async with _db_lock:
-        for item in items:
-            if item.idempotency_key and item.idempotency_key in seen_keys:
-                raise HTTPException(status_code=409, detail=f"Duplicate idempotency_key in batch: {item.idempotency_key}")
-            if item.idempotency_key:
-                seen_keys.add(item.idempotency_key)
-            req_type = "GENERATE_VIDEO_REFS" if item.type in ("reference_to_video", "ingredients", "references", "omni", "r2v") else "GENERATE_VIDEO"
-            existing_id = await _find_idempotent_job(db, item.idempotency_key, req_type)
-            if existing_id:
-                job_ids.append(existing_id)
-                continue
-            job_id = f"job_{uuid.uuid4().hex[:16]}"
-            aspect = _normalize_video_aspect(item.aspect_ratio)
-            orientation = "HORIZONTAL" if "LANDSCAPE" in aspect else "VERTICAL"
-            is_ref_based = item.type in ("reference_to_video", "ingredients", "references", "omni", "r2v")
-            req_type = "GENERATE_VIDEO_REFS" if is_ref_based else "GENERATE_VIDEO"
+    for item in items:
+        resp = await generate_video(item)
+        if resp.jobs:
+            job_ids.append(resp.jobs[0].id)
 
-            payload_dict = {
-                "prompt": item.prompt,
-                "idempotency_key": item.idempotency_key,
-                "installation_id": item.installation_id,
-                "type": item.type,
-                "input_images": [img.model_dump() for img in item.input_images],
-                "aspect_ratio": aspect,
-                "duration_seconds": item.duration_seconds,
-                "project_id": item.project_id,
-                "start_media_id": item.start_media_id,
-                "end_media_id": item.end_media_id,
-                "reference_media_ids": item.reference_media_ids,
-                "model": item.model or item.mode or item.model_family or item.quality or "omni_flash",
-                "quality": item.quality,
-                "dialogue": item.dialogue,
-            }
-            records.append((job_id, req_type, orientation, json.dumps(payload_dict)))
-            job_ids.append(job_id)
+    return await _resolve_jobs_response(job_ids)
 
-        for rec in records:
-            await db.execute(
-                """
-                INSERT INTO request (id, type, orientation, status, payload_json, created_at, updated_at)
-                VALUES (?, ?, ?, 'PENDING', ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-                """,
-                rec,
+
+@router.post("/v1/images/upscale")
+@router.post("/v1/images/export")
+async def upscale_image(
+    payload: ImageUpscaleRequest,
+    accept: str | None = Header(default=None, alias="Accept"),
+):
+    """Synchronously upscale an image to 2K/4K resolution via Flow's native RPC SPrCad.
+
+    Accepts an existing media_id, image_base64, or image_url (auto-uploaded to Flow).
+    Returns JSON with encodedImage base64 data, or raw binary JPEG if download=True or Accept: image/jpeg.
+    """
+    client = get_flow_client()
+    media_id = payload.media_id
+
+    if not media_id and (payload.image_base64 or payload.image_url):
+        media_id, _ = await _resolve_media_id_from_input(
+            client,
+            image_base64=payload.image_base64,
+            image_url=payload.image_url,
+            project_id=payload.project_id or "",
+            preferred_installation=payload.installation_id,
+        )
+
+    result = await client.upscale_image(
+        media_id=media_id,
+        project_id=payload.project_id,
+        resolution=payload.quality,
+        preferred_installation=payload.installation_id,
+    )
+
+    if result.get("error"):
+        status_code = result.get("status", 502) if isinstance(result.get("status"), int) else 502
+        raise HTTPException(status_code=status_code, detail=result.get("error"))
+
+    data = result.get("data", {})
+    encoded = data.get("encodedImage", "")
+
+    wants_binary = payload.download or (accept and "image/" in accept)
+    if wants_binary and encoded:
+        try:
+            image_bytes = base64.b64decode(encoded)
+            return Response(
+                content=image_bytes,
+                media_type="image/jpeg",
+                headers={
+                    "Content-Disposition": f'attachment; filename="flow_{payload.quality.lower()}_{media_id[:8]}.jpg"',
+                    "X-Flow-Image-Quality": payload.quality,
+                },
             )
+        except Exception:
+            pass
+
+    return JSONResponse(status_code=200, content=result)
+
+
+@router.post("/v1/images/edits", response_model=JobsResponse, status_code=status.HTTP_200_OK)
+async def edit_image(
+    payload: ImageEditRequest,
+    idempotency_header: str | None = Header(default=None, alias="Idempotency-Key", min_length=1, max_length=200),
+):
+    """Edit/modify images directly with Banana (synchronous 200 OK)."""
+    client = get_flow_client()
+    if not getattr(client, "connected", False) and not getattr(client, "list_extensions", lambda: [])():
+        raise HTTPException(status_code=503, detail="Flow extension is not connected")
+
+    header_val = idempotency_header if isinstance(idempotency_header, str) else None
+    idempotency_key = _resolve_idempotency_key(header_val, payload.idempotency_key)
+    db = await get_db()
+    if idempotency_key:
+        async with _db_lock:
+            existing_id = await _find_idempotent_job(db, idempotency_key, "EDIT_IMAGE")
+            if existing_id:
+                return await _resolve_jobs_response([existing_id])
+
+    job_id = f"job_{uuid.uuid4().hex[:16]}"
+    aspect = _normalize_image_aspect(payload.aspect_ratio)
+    orientation = "HORIZONTAL" if "LANDSCAPE" in aspect else "VERTICAL"
+    model = normalize_image_model(payload.model or "NANO_BANANA_PRO")
+    inst_id = payload.installation_id
+    pid = payload.project_id or ""
+
+    base_mid, inst_id = await _resolve_media_id_from_input(
+        client,
+        media_id=payload.base_media_id,
+        image_base64=payload.base_image_base64,
+        image_url=payload.base_image_url,
+        project_id=pid,
+        preferred_installation=inst_id,
+    )
+
+    ref_mids = []
+    if payload.input_images:
+        for img in payload.input_images:
+            mid, inst_id = await _resolve_media_id_from_input(
+                client,
+                media_id=img.media_id,
+                image_base64=img.image_base64,
+                image_url=img.image_url,
+                mime_type=img.mime_type,
+                project_id=pid,
+                preferred_installation=inst_id,
+            )
+            if mid:
+                ref_mids.append(mid)
+
+    payload_dict = {
+        "prompt": payload.prompt,
+        "idempotency_key": idempotency_key,
+        "installation_id": inst_id,
+        "aspect_ratio": aspect,
+        "base_media_id": base_mid,
+        "model": model,
+        "count": payload.count,
+        "seed": payload.seed,
+        "project_id": pid,
+        "generated_media": [],
+    }
+
+    res = await client.edit_image(
+        prompt=payload.prompt,
+        source_media_id=base_mid,
+        project_id=pid,
+        aspect_ratio=aspect,
+        character_media_ids=ref_mids if ref_mids else None,
+        image_model=model,
+        preferred_installation=inst_id,
+        count=payload.count,
+        seed=payload.seed,
+    )
+
+    if res.get("error") or (isinstance(res.get("status"), int) and res["status"] >= 400):
+        code = res.get("status", 502) if isinstance(res.get("status"), int) and res.get("status") >= 400 else 502
+        raise HTTPException(status_code=code, detail=res.get("error") or "Image edit failed")
+
+    media_items = _extract_media_items(res, "EDIT_IMAGE")
+    if not media_items:
+        data = res.get("data", res)
+        if isinstance(data, dict) and data.get("url"):
+            media_items = [{"media_id": data.get("media_id") or base_mid, "url": data["url"]}]
+        else:
+            media_items = [{"media_id": base_mid, "url": None}]
+
+    primary_media = media_items[0]
+    target_inst = res.get("_installation_id") or inst_id
+    payload_dict["installation_id"] = target_inst
+    payload_dict["generated_media"] = media_items
+
+    async with _db_lock:
+        await db.execute(
+            """
+            INSERT INTO request (id, type, orientation, status, media_id, output_url, installation_id, payload_json, created_at, updated_at)
+            VALUES (?, 'EDIT_IMAGE', ?, 'COMPLETED', ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            """,
+            (job_id, orientation, primary_media.get("media_id"), primary_media.get("url"), target_inst, json.dumps(payload_dict)),
+        )
         await db.commit()
 
-    _wake_worker()
-    logger.info("v1 Client API queued %d Video Jobs in batch", len(job_ids))
-    return await _resolve_jobs_response(job_ids)
+    logger.info("v1 Client API direct Image Edit Job %s completed", job_id)
+    return await _resolve_jobs_response([job_id])
 
 
 @router.post("/v1/jobs/status", response_model=JobsResponse)
@@ -483,10 +959,10 @@ async def get_job_status(payload: JobStatusRequest):
     return await _resolve_jobs_response(ids)
 
 
-@router.get("/v1/jobs/{job_id}", response_model=JobsResponse)
+@router.get("/v1/jobs/{job_id}", response_model=JobPollResponse)
 async def get_job_by_id(job_id: str):
-    """Query job status by job_id (GET)."""
-    return await _resolve_jobs_response([job_id])
+    """Query job status by job_id (GET) — minimal polling response."""
+    return await _resolve_single_job_response(job_id)
 
 
 @router.get("/v1/jobs/{job_id}/executions")
@@ -497,7 +973,7 @@ async def get_job_executions(job_id: str):
     return {"job_id": job_id, "executions": await list_calls(job_id)}
 
 
-@router.get("/v1/jobs/status/{job_id}", response_model=JobsResponse)
+@router.get("/v1/jobs/status/{job_id}", response_model=JobPollResponse)
 async def get_job_status_by_id(job_id: str):
-    """Query job status by job_id (GET /v1/jobs/status/{job_id})."""
-    return await _resolve_jobs_response([job_id])
+    """Query job status by job_id (GET /v1/jobs/status/{job_id}) — minimal polling response."""
+    return await _resolve_single_job_response(job_id)

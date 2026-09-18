@@ -80,7 +80,10 @@ async def client_health(response: Response):
             "image_generation": Capability(available=bool(provider_ready), reason=reason),
             "video_generation": Capability(available=bool(provider_ready), reason=reason),
             "video_first_frame": Capability(available=video_first_frame_ready, reason=reason),
-            "video_start_end": Capability(available=False, reason="UNSUPPORTED_ON_BATCH_API"),
-            "video_reference": Capability(available=False, reason="UNSUPPORTED_ON_BATCH_API"),
+            "video_start_end": Capability(available=bool(provider_ready), reason=reason),
+            "video_reference": Capability(available=bool(provider_ready), reason=reason),
+            "video_text": Capability(available=bool(provider_ready), reason=reason),
+            "image_upscale": Capability(available=bool(provider_ready), reason=reason),
+            "image_edit": Capability(available=bool(provider_ready), reason=reason),
         },
     )

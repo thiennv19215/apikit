@@ -665,9 +665,9 @@ class FlowKitClient:
         while time.time() - start < timeout:
             res = self.v1_get_job(job_id)
             jobs = res.get("jobs", [])
-            if not jobs:
+            job = jobs[0] if jobs else res
+            if not job or (not job.get("status") and not job.get("job_id")):
                 raise FlowKitError(f"No job details returned for job_id {job_id}: {res}")
-            job = jobs[0]
             if on_progress:
                 on_progress(job)
             status = job.get("status")
