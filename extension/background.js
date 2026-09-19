@@ -226,11 +226,10 @@ async function openOrGetFlowTab({ createIfMissing = false } = {}) {
     if (!createIfMissing) return null;
 
     const tab = await safeCreateTab(FLOW_TAB_URL, false);
-    if (!tab) return null;
+    if (!tab?.id) return null;
     await sleep(4000);
-    const fresh = await chrome.tabs.query({ url: flowUrls });
-    candidate = fresh.find((t) => !t.discarded) || fresh[0] || tab;
-    return candidate ? await reviveTabIfNeeded(candidate) : null;
+    const fresh = await chrome.tabs.get(tab.id).catch(() => null);
+    return fresh ? await reviveTabIfNeeded(fresh) : null;
   } catch (e) {
     console.warn('[FlowAgent] openOrGetFlowTab failed:', e?.message);
     return null;
@@ -620,31 +619,102 @@ function sendToAgent(msg) {
 
 // ─── reCAPTCHA Solving ──────────────────────────────────────
 
+const CAPTCHA_SITE_KEY = '6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV';
+
+function captchaErrorMessage(error) {
+  return typeof error === 'string' ? error : error?.message || '';
+}
+
+function isCaptchaBridgeError(error) {
+  const msg = captchaErrorMessage(error);
+  return [
+    'Receiving end does not exist',
+    'Could not establish connection',
+    'message channel closed',
+    'message port closed',
+    'A listener indicated an asynchronous response',
+  ].some((marker) => msg.includes(marker));
+}
+
+async function injectCaptchaBridge(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: ['content.js'],
+  });
+  await sleep(200);
+}
+
+async function mintCaptchaInPage(tabId, pageAction) {
+  try {
+    const [injected] = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      args: [pageAction, CAPTCHA_SITE_KEY],
+      func: async (action, siteKey) => {
+        const tailKey = '__flowKitCaptchaMintTail';
+        const previous = (
+          globalThis[tailKey] instanceof Promise
+            ? globalThis[tailKey]
+            : Promise.resolve()
+        ).catch(() => {});
+        let release;
+        globalThis[tailKey] = new Promise((resolve) => { release = resolve; });
+        try {
+          const deadline = Date.now() + 22000;
+          while (!globalThis.grecaptcha?.enterprise?.execute) {
+            if (Date.now() >= deadline) return { error: 'grecaptcha not available' };
+            await new Promise((resolve) => setTimeout(resolve, 200));
+          }
+          const token = await globalThis.grecaptcha.enterprise.execute(siteKey, { action });
+          return token ? { token } : { error: 'NO_TOKEN' };
+        } catch (error) {
+          return { error: error?.message || 'CAPTCHA_EXECUTE_FAILED' };
+        } finally {
+          release();
+        }
+      },
+    });
+    return injected?.result || { error: 'NO_INJECTION_RESULT' };
+  } catch (error) {
+    return { error: captchaErrorMessage(error) || 'CAPTCHA_INJECTION_FAILED' };
+  }
+}
+
 async function requestCaptchaFromTab(tabId, requestId, pageAction) {
   try {
-    return await chrome.tabs.sendMessage(tabId, {
+    const response = await chrome.tabs.sendMessage(tabId, {
       type: 'GET_CAPTCHA',
       requestId,
       pageAction,
     });
+    if (response?.token) return response;
+    if (['CONTENT_TIMEOUT', 'NO_TOKEN', 'grecaptcha not available'].includes(response?.error)) {
+      return await mintCaptchaInPage(tabId, pageAction);
+    }
+    return response || { error: 'NO_TOKEN' };
   } catch (error) {
-    const msg = error?.message || '';
-    const shouldInject =
-      msg.includes('Receiving end does not exist') ||
-      msg.includes('Could not establish connection');
-    if (!shouldInject) throw error;
+    if (!isCaptchaBridgeError(error)) {
+      return { error: captchaErrorMessage(error) || 'CAPTCHA_FAILED' };
+    }
+  }
 
-    // Inject content script and retry
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      files: ['content.js'],
-    });
-    await sleep(200);
-    return await chrome.tabs.sendMessage(tabId, {
+  try {
+    await injectCaptchaBridge(tabId);
+    const response = await chrome.tabs.sendMessage(tabId, {
       type: 'GET_CAPTCHA',
       requestId,
       pageAction,
     });
+    if (response?.token) return response;
+    if (['CONTENT_TIMEOUT', 'NO_TOKEN', 'grecaptcha not available'].includes(response?.error)) {
+      return await mintCaptchaInPage(tabId, pageAction);
+    }
+    return response || { error: 'NO_TOKEN' };
+  } catch (error) {
+    if (!isCaptchaBridgeError(error)) {
+      return { error: captchaErrorMessage(error) || 'CAPTCHA_FAILED' };
+    }
+    return await mintCaptchaInPage(tabId, pageAction);
   }
 }
 
@@ -687,7 +757,7 @@ async function activateTabForCaptcha(tab) {
 function captchaFromTab(tabId, requestId, captchaAction) {
   return Promise.race([
     requestCaptchaFromTab(tabId, requestId, captchaAction),
-    new Promise((_, rej) => setTimeout(() => rej(new Error('CAPTCHA_TIMEOUT')), 30000)),
+    new Promise((_, rej) => setTimeout(() => rej(new Error('CAPTCHA_TIMEOUT')), 60000)),
   ]);
 }
 
@@ -698,8 +768,7 @@ async function solveCaptcha(requestId, captchaAction) {
   if (!tabs.length) {
     const freshTab = await openOrGetFlowTab({ createIfMissing: true });
     if (!freshTab) return { error: 'NO_FLOW_TAB' };
-    tabs = await chrome.tabs.query({ url: flowUrls });
-    if (!tabs.length) return { error: 'NO_FLOW_TAB' };
+    tabs = [freshTab];
   }
 
   // Try each Flow tab in turn. A tab that answers "no grecaptcha" is a tab
@@ -733,15 +802,23 @@ async function solveCaptcha(requestId, captchaAction) {
     }
   }
 
-  // Every candidate failed — last-ditch, try to open/revive fresh tab once.
+  // Every candidate failed — try one disposable tab without re-selecting a stale tab.
+  let recoveryTab = null;
   try {
-    const target = await openOrGetFlowTab({ createIfMissing: true });
-    if (!target) return { error: 'NO_FLOW_TAB' };
+    recoveryTab = await safeCreateTab(FLOW_TAB_URL, false);
+    if (!recoveryTab?.id) return { error: 'NO_FLOW_TAB' };
+    await sleep(3000);
+    const target = await chrome.tabs.get(recoveryTab.id).catch(() => null);
+    if (!target || target.discarded) return { error: 'NO_FLOW_TAB' };
     await activateTabForCaptcha(target);
     return await captchaFromTab(target.id, requestId, captchaAction);
   } catch (e) {
     const msg = e?.message || errors[0] || 'NO_FLOW_TAB';
     return { error: msg.includes('No current window') ? 'NO_FLOW_TAB' : msg };
+  } finally {
+    if (recoveryTab?.id) {
+      try { await chrome.tabs.remove(recoveryTab.id); } catch (_) {}
+    }
   }
 }
 

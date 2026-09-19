@@ -1141,7 +1141,9 @@ async def _handle_failure(rid: str, req: dict, result: dict, retry_after: dict =
         retry = req.get("retry_count", 0) + 1
         if retry < 10:
             await crud.update_request(rid, status="PENDING", retry_count=retry, error_message=str(error_msg))
-            logger.warning("Request %s reCAPTCHA failed (retry %d/10), will retry", rid[:8], retry)
+            if retry_after is not None:
+                retry_after[rid] = time.time() + 15.0
+            logger.warning("Request %s reCAPTCHA failed (retry %d/10 in 15s), will retry", rid[:8], retry)
             return
         else:
             await crud.update_request(rid, status="FAILED", error_message=str(error_msg))

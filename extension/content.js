@@ -1,15 +1,17 @@
-/**
- * Content script — bridge between background.js and injected.js
- * Injects injected.js into MAIN world to access window.grecaptcha
- */
-(function () {
+(() => {
+  if (globalThis.__flowKitContentLoaded) return;
+  globalThis.__flowKitContentLoaded = true;
+
+  /**
+   * Content script — bridge between background.js and injected.js
+   * Injects injected.js into MAIN world to access window.grecaptcha
+   */
   const s = document.createElement('script');
   s.src = chrome.runtime.getURL('injected.js');
   s.onload = () => s.remove();
   (document.head || document.documentElement).appendChild(s);
-})();
 
-chrome.runtime.onMessage.addListener((msg, _, reply) => {
+  chrome.runtime.onMessage.addListener((msg, _, reply) => {
   if (msg.type !== 'GET_CAPTCHA') return;
 
   const { requestId, pageAction } = msg;
@@ -38,12 +40,13 @@ chrome.runtime.onMessage.addListener((msg, _, reply) => {
 
 // ─── TRPC Media URL Monitor ─────────────────────────────────
 // Forward intercepted TRPC responses with media URLs to background.js
-window.addEventListener('TRPC_MEDIA_URLS', (e) => {
-  const { url, body } = e.detail || {};
-  if (!body) return;
-  chrome.runtime.sendMessage({
-    type: 'TRPC_MEDIA_URLS',
-    trpcUrl: url,
-    body,
-  }).catch(() => {});
-});
+  window.addEventListener('TRPC_MEDIA_URLS', (e) => {
+    const { url, body } = e.detail || {};
+    if (!body) return;
+    chrome.runtime.sendMessage({
+      type: 'TRPC_MEDIA_URLS',
+      trpcUrl: url,
+      body,
+    }).catch(() => {});
+  });
+})();

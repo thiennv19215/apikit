@@ -1,13 +1,17 @@
-/**
- * Injected into the page's MAIN world on flow.google.com (and an old pinned
- * labs.google tab) — has access to window.grecaptcha.
- *
- * The reCAPTCHA site key survived the September 2026 migration unchanged. The
- * TRPC fetch intercept below did not: it belongs to the labs.google frontend
- * and is inert on flow.google.com, where media urls come back inline on the
- * generate call and from the media rpc.
- */
-const SITE_KEY = '6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV';
+(() => {
+  if (window.__flowKitInjected) return;
+  window.__flowKitInjected = true;
+
+  /**
+   * Injected into the page's MAIN world on flow.google.com (and an old pinned
+   * labs.google tab) — has access to window.grecaptcha.
+   *
+   * The reCAPTCHA site key survived the September 2026 migration unchanged. The
+   * TRPC fetch intercept below did not: it belongs to the labs.google frontend
+   * and is inert on flow.google.com, where media urls come back inline on the
+   * generate call and from the media rpc.
+   */
+  const SITE_KEY = '6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV';
 
 // ─── TRPC Response Monitor ─────────────────────────────────
 // Monkey-patch fetch to intercept TRPC responses containing media URLs.
@@ -34,13 +38,17 @@ window.fetch = async function (...args) {
 };
 
 
-let captchaMintTail = Promise.resolve();
+  const CAPTCHA_MINT_TAIL = '__flowKitCaptchaMintTail';
 
-async function mintCaptcha(pageAction) {
-  const previous = captchaMintTail.catch(() => {});
-  let release;
-  captchaMintTail = new Promise((resolve) => { release = resolve; });
-  await previous;
+  async function mintCaptcha(pageAction) {
+    const previous = (
+      globalThis[CAPTCHA_MINT_TAIL] instanceof Promise
+        ? globalThis[CAPTCHA_MINT_TAIL]
+        : Promise.resolve()
+    ).catch(() => {});
+    let release;
+    globalThis[CAPTCHA_MINT_TAIL] = new Promise((resolve) => { release = resolve; });
+    await previous;
   try {
     await waitForGrecaptcha();
     return await window.grecaptcha.enterprise.execute(SITE_KEY, {
@@ -76,3 +84,4 @@ function waitForGrecaptcha(timeout = 22000) {   // it loads lazily; 10s was opti
     check();
   });
 }
+})();

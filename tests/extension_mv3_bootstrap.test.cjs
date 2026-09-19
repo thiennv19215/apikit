@@ -43,6 +43,10 @@ const chrome = {
     onInstalled: event(lifecycleListeners.installed),
     onMessage: event(),
     onStartup: event(lifecycleListeners.startup),
+    getManifest: () => ({
+      version: '0.3.2',
+      host_permissions: ['https://flow.google.com/*'],
+    }),
     sendMessage: async () => {},
   },
   scripting: { executeScript: async () => {} },

@@ -214,3 +214,24 @@ class TestHandleFailure:
 
         call_kwargs = mock_crud.update_request.call_args
         assert "caller does not have permission" in call_kwargs[1]["error_message"]
+
+    @pytest.mark.asyncio
+    async def test_recaptcha_retry_uses_backoff(self):
+        req = make_req()
+        rid = req["id"]
+        retry_after = {}
+
+        with patch("agent.worker.processor.crud") as mock_crud:
+            mock_crud.update_request = AsyncMock()
+            mock_crud.update_scene = AsyncMock()
+            await _handle_failure(
+                rid,
+                req,
+                {"error": "CAPTCHA_FAILED: message channel closed"},
+                retry_after,
+            )
+
+        assert retry_after[rid] >= time.time() + 14
+        call_kwargs = mock_crud.update_request.call_args
+        assert call_kwargs[1]["status"] == "PENDING"
+        assert call_kwargs[1]["retry_count"] == 1
