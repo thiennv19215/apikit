@@ -27,6 +27,12 @@ from agent.api.v1.schemas import (
     VideoGenerationRequest,
     normalize_image_model,
 )
+from agent.api.v1.errors import (
+    V1ErrorCode,
+    build_v1_job_error,
+    parse_v1_error,
+    raise_v1_http_error,
+)
 from agent.db import crud
 from agent.db.schema import get_db, _db_lock
 from agent.services.flow_client import get_flow_client
@@ -174,18 +180,7 @@ def _build_job_item(req: dict) -> Job:
         except Exception:
             pass
     if raw_status == "FAILED":
-        msg = err_msg or "Generation failed"
-        if "media not found" in msg.lower() or "từ chối tạo video" in msg.lower():
-            user_msg = "Google Flow từ chối tạo video (nội dung có thể vi phạm kiểm duyệt hoặc tác vụ bị huỷ)."
-        elif op_id and "operation id" not in msg.lower():
-            user_msg = f"Lỗi trong quá trình render/polling (Google Operation ID: {op_id}): {msg}"
-        else:
-            user_msg = msg
-        job_error = JobError(
-            code="GENERATION_FAILED",
-            message=user_msg,
-            details=err_msg or "Generation failed",
-        )
+        job_error = build_v1_job_error(err_msg or "Generation failed", op_id=op_id)
     elif raw_status in ("PROCESSING", "PENDING") and not req.get("output_url"):
         created_at_str = req.get("created_at") or req.get("updated_at")
         if created_at_str:
@@ -199,10 +194,9 @@ def _build_job_item(req: dict) -> Job:
                 from agent.config import VIDEO_POLL_TIMEOUT
                 if elapsed > VIDEO_POLL_TIMEOUT:
                     job_status = "failed"
-                    job_error = JobError(
-                        code="TIMEOUT",
-                        message=f"Generation timed out after {int(elapsed)}s",
-                        details=f"Exceeded VIDEO_POLL_TIMEOUT ({VIDEO_POLL_TIMEOUT}s)",
+                    job_error = build_v1_job_error(
+                        f"Generation timed out after {int(elapsed)}s (Exceeded VIDEO_POLL_TIMEOUT {VIDEO_POLL_TIMEOUT}s)",
+                        op_id=op_id,
                     )
             except Exception:
                 pass
@@ -346,13 +340,30 @@ async def _resolve_media_id_from_input(
             preferred_installation=preferred_installation,
         )
         if res.get("error"):
-            raise HTTPException(status_code=502, detail=f"Failed to upload image to Google Flow: {res.get('error')}")
+            raise_v1_http_error(
+                res.get("error"),
+                default_message="Tải ảnh lên Google Flow thất bại",
+                default_action="Kiểm tra tab Google Flow hoặc thử lại với ảnh dung lượng nhỏ hơn.",
+            )
         mid = res.get("_mediaId") or res.get("name") or res.get("media_id") or res.get("data", {}).get("media", {}).get("name")
         inst_id = res.get("_installation_id") or preferred_installation
         if not mid:
-            raise HTTPException(status_code=502, detail="Failed to obtain media_id from Google Flow upload")
+            raise_v1_http_error(
+                "Failed to obtain media_id from Google Flow upload",
+                status_code=502,
+                default_message="Không nhận được media_id từ Google Flow sau khi upload ảnh.",
+                default_action="Kiểm tra tab Google Flow hoặc thử lại với ảnh khác.",
+            )
         return mid, inst_id
-    raise HTTPException(status_code=400, detail="No image provided (must provide image_base64, image_url, or media_id)")
+    raise HTTPException(
+        status_code=400,
+        detail={
+            "code": "MISSING_IMAGE_INPUT",
+            "message": "Thiếu ảnh đầu vào (phải cung cấp image_base64, image_url, hoặc media_id).",
+            "details": "No image provided (must provide image_base64, image_url, or media_id)",
+            "action": "Vui lòng cung cấp chuỗi image_base64 hoặc đường dẫn image_url hợp lệ.",
+        },
+    )
 
 
 async def _poll_video_result(client, submit_result: dict, timeout: int = 120) -> dict:
@@ -374,8 +385,15 @@ async def _poll_video_result(client, submit_result: dict, timeout: int = 120) ->
                     m = wf.get("media", {})
                     if m.get("url"):
                         return {"status": 200, "media_id": m.get("media_id"), "url": m.get("url")}
-                break
-        raise HTTPException(status_code=504, detail=f"Omni Flash video generation timed out after {timeout}s")
+                raise_v1_http_error(
+                    "Google Flow đã hoàn thành xử lý nhưng không trả về URL video (có thể do kiểm duyệt nội dung hậu kỳ hoặc tác vụ bị huỷ).",
+                    status_code=502,
+                )
+        raise_v1_http_error(
+            f"Omni Flash video generation timed out after {timeout}s",
+            status_code=504,
+            default_message=f"Thời gian chờ tạo video từ Google Flow vượt quá giới hạn ({timeout}s).",
+        )
 
     # Mode: batch_operation or standard operations
     operations = submit_result.get("operations") or (data.get("operations", []) if isinstance(data, dict) else [])
@@ -384,7 +402,11 @@ async def _poll_video_result(client, submit_result: dict, timeout: int = 120) ->
     if not operations and isinstance(data, dict) and "operation" in data:
         operations = [data]
     if not operations:
-        raise HTTPException(status_code=502, detail="No operations returned from video generation")
+        raise_v1_http_error(
+            "No operations returned from video generation",
+            status_code=502,
+            default_message="Google Flow không trả về operation hợp lệ cho tác vụ video.",
+        )
 
     # If already marked successful (e.g. mock or immediate completion)
     first_op = operations[0]
@@ -400,11 +422,11 @@ async def _poll_video_result(client, submit_result: dict, timeout: int = 120) ->
 
     poll_res = await _poll_operations(client, operations, timeout=timeout)
     if poll_res.get("error"):
-        raise HTTPException(status_code=502, detail=f"Video generation error: {poll_res.get('error')}")
+        raise_v1_http_error(poll_res.get("error"), default_message="Lỗi trong quá trình render video")
 
     gen_res = parse_result(poll_res, "GENERATE_VIDEO")
     if not gen_res.success:
-        raise HTTPException(status_code=502, detail=f"Video generation failed: {gen_res.error}")
+        raise_v1_http_error(gen_res.error or "Video generation failed", default_message="Tạo video thất bại")
 
     return {"status": 200, "media_id": gen_res.media_id, "url": gen_res.url}
 
@@ -452,7 +474,12 @@ async def generate_image(
     """Generate images directly with Banana Pro / Banana 2 (synchronous 200 OK)."""
     client = get_flow_client()
     if not getattr(client, "connected", False) and not getattr(client, "list_extensions", lambda: [])():
-        raise HTTPException(status_code=503, detail="Flow extension is not connected")
+        raise_v1_http_error(
+            "Flow extension is not connected",
+            status_code=503,
+            default_message="Chrome extension FlowKit chưa kết nối với backend server.",
+            default_action="Vui lòng mở trình duyệt Chrome có cài extension FlowKit và kiểm tra trạng thái kết nối.",
+        )
 
     header_val = idempotency_header if isinstance(idempotency_header, str) else None
     idempotency_key = _resolve_idempotency_key(header_val, payload.idempotency_key)
@@ -507,8 +534,8 @@ async def generate_image(
     )
 
     if res.get("error") or (isinstance(res.get("status"), int) and res["status"] >= 400):
-        code = res.get("status", 502) if isinstance(res.get("status"), int) and res.get("status") >= 400 else 502
-        raise HTTPException(status_code=code, detail=res.get("error") or "Image generation failed")
+        code = res.get("status") if isinstance(res.get("status"), int) and res.get("status") >= 400 else None
+        raise_v1_http_error(res.get("error") or "Image generation failed", status_code=code, default_message="Sinh ảnh thất bại")
 
     media_items = _extract_media_items(res, "GENERATE_IMAGE")
     if not media_items:
@@ -516,7 +543,12 @@ async def generate_image(
         if isinstance(data, dict) and data.get("url"):
             media_items = [{"media_id": data.get("media_id") or job_id, "url": data["url"]}]
         else:
-            raise HTTPException(status_code=502, detail="Image generation succeeded but returned no media items")
+            raise_v1_http_error(
+                "Image generation succeeded but returned no media items",
+                status_code=502,
+                default_message="Google Flow đã xử lý xong nhưng không trả về ảnh nào.",
+                default_action="Thử lại với prompt khác hoặc kiểm tra quota trên tab Google Flow.",
+            )
 
     primary_media = media_items[0]
     target_inst = res.get("_installation_id") or inst_id
@@ -564,7 +596,12 @@ async def generate_video(
     """Generate videos with Omni Flash (asynchronous 200 OK, returns job_id for polling)."""
     client = get_flow_client()
     if not getattr(client, "connected", False) and not getattr(client, "list_extensions", lambda: [])():
-        raise HTTPException(status_code=503, detail="Flow extension is not connected")
+        raise_v1_http_error(
+            "Flow extension is not connected",
+            status_code=503,
+            default_message="Chrome extension FlowKit chưa kết nối với backend server.",
+            default_action="Vui lòng mở trình duyệt Chrome có cài extension FlowKit và kiểm tra trạng thái kết nối.",
+        )
     header_val = idempotency_header if isinstance(idempotency_header, str) else None
     idempotency_key = _resolve_idempotency_key(header_val, payload.idempotency_key)
     is_ref_based = payload.type in ("reference_to_video", "ingredients", "references", "omni", "r2v")
@@ -715,8 +752,8 @@ async def generate_video(
             )
 
     if submit_result.get("error") or (isinstance(submit_result.get("status"), int) and submit_result["status"] >= 400):
-        code = submit_result.get("status", 502) if isinstance(submit_result.get("status"), int) and submit_result.get("status") >= 400 else 502
-        raise HTTPException(status_code=code, detail=submit_result.get("error") or "Video submission failed")
+        code = submit_result.get("status") if isinstance(submit_result.get("status"), int) and submit_result.get("status") >= 400 else None
+        raise_v1_http_error(submit_result.get("error") or "Video submission failed", status_code=code, default_message="Gửi yêu cầu tạo video thất bại")
 
     target_inst = submit_result.get("_installation_id") or inst_id
     operations = submit_result.get("operations") or (submit_result.get("data", {}).get("operations", []) if isinstance(submit_result.get("data"), dict) else [])
@@ -820,8 +857,8 @@ async def upscale_image(
     )
 
     if result.get("error"):
-        status_code = result.get("status", 502) if isinstance(result.get("status"), int) else 502
-        raise HTTPException(status_code=status_code, detail=result.get("error"))
+        code = result.get("status") if isinstance(result.get("status"), int) and result.get("status") >= 400 else None
+        raise_v1_http_error(result.get("error"), status_code=code, default_message="Phóng to ảnh (upscale) thất bại")
 
     data = result.get("data", {})
     encoded = data.get("encodedImage", "")
@@ -852,7 +889,12 @@ async def edit_image(
     """Edit/modify images directly with Banana (synchronous 200 OK)."""
     client = get_flow_client()
     if not getattr(client, "connected", False) and not getattr(client, "list_extensions", lambda: [])():
-        raise HTTPException(status_code=503, detail="Flow extension is not connected")
+        raise_v1_http_error(
+            "Flow extension is not connected",
+            status_code=503,
+            default_message="Chrome extension FlowKit chưa kết nối với backend server.",
+            default_action="Vui lòng mở trình duyệt Chrome có cài extension FlowKit và kiểm tra trạng thái kết nối.",
+        )
 
     header_val = idempotency_header if isinstance(idempotency_header, str) else None
     idempotency_key = _resolve_idempotency_key(header_val, payload.idempotency_key)
@@ -920,8 +962,8 @@ async def edit_image(
     )
 
     if res.get("error") or (isinstance(res.get("status"), int) and res["status"] >= 400):
-        code = res.get("status", 502) if isinstance(res.get("status"), int) and res.get("status") >= 400 else 502
-        raise HTTPException(status_code=code, detail=res.get("error") or "Image edit failed")
+        code = res.get("status") if isinstance(res.get("status"), int) and res.get("status") >= 400 else None
+        raise_v1_http_error(res.get("error") or "Image edit failed", status_code=code, default_message="Chỉnh sửa ảnh thất bại")
 
     media_items = _extract_media_items(res, "EDIT_IMAGE")
     if not media_items:

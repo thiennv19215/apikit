@@ -526,17 +526,63 @@ Tải trực tiếp video MP4 thành phẩm về máy.
 
 ---
 
-## 4. Bảng Mã Lỗi & HTTP Status
+## 4. Chuẩn Báo Lỗi & Bảng Mã Lỗi (Error Handling)
 
-| Mã HTTP | Tên | Ý nghĩa & Hành động khắc phục |
-|---|---|---|
-| **200 OK** | Success | Tác vụ truy vấn thành công. |
-| **201 Created** | Created | Tạo mới nhân vật/tài nguyên thành công. |
-| **202 Accepted** | Queued | Yêu cầu sinh ảnh/video hợp lệ và đã đưa vào SQLite queue. |
-| **204 No Content** | Deleted | Xóa tài nguyên thành công. |
-| **404 Not Found** | Not Found | Không tìm thấy `job_id`, `character_id`, hoặc file âm thanh. |
-| **422 Unprocessable** | Validation Error | Sai định dạng body (ví dụ mảng batch rỗng, thiếu prompt, hoặc cố tình gửi direct `media_id` thay vì Base64). |
-| **503 Unavailable** | Maintenance Mode | Hệ thống đang bật cờ `CLIENT_MAINTENANCE`. Client cần tạm dừng gọi và thử lại sau `Retry-After: 60` giây. |
+Hệ thống Client API v1 cung cấp cơ chế báo lỗi chuẩn hóa, chi tiết bằng tiếng Việt kèm mã lỗi máy đọc được (`code`), thông điệp rõ ràng (`message`), chi tiết lỗi kỹ thuật gốc (`details`), và gợi ý hành động khắc phục (`action`).
+
+### 4.1. Cấu Trúc Lỗi Trả Về Cho Gọi Đồng Bộ (HTTP Sync Exception)
+Khi các endpoint như `POST /v1/images/generations`, `POST /v1/videos/generations`, `POST /v1/images/upscale`, `POST /v1/images/edits` gặp lỗi, response trả về HTTP Status tương ứng cùng body JSON có dạng:
+
+```json
+{
+  "detail": {
+    "code": "SAFETY_OR_POLICY_VIOLATION",
+    "message": "Google Flow từ chối yêu cầu (mã lỗi [5] - Thường do nội dung prompt hoặc ảnh tham chiếu vi phạm chính sách kiểm duyệt an toàn của Google, hoặc tài khoản bị giới hạn).",
+    "details": "RpcError: ('wbgUpc', [5])",
+    "action": "Vui lòng điều chỉnh lại prompt (dùng từ ngữ trung tính, tránh nhạy cảm/bạo lực) hoặc đổi ảnh tham chiếu và thử lại."
+  }
+}
+```
+
+### 4.2. Cấu Trúc Lỗi Khi Polling Job Thất Bại (`JobError`)
+Khi một tác vụ video hoặc batch thất bại, khi gọi `GET /v1/jobs/{job_id}` hoặc `POST /v1/jobs/status`, trường `error` sẽ chứa object `JobError`:
+
+```json
+{
+  "job_id": "job_e72a819b1248",
+  "status": "failed",
+  "type": "video",
+  "url": null,
+  "media": [],
+  "error": {
+    "code": "SAFETY_OR_POLICY_VIOLATION",
+    "message": "Google Flow từ chối yêu cầu (mã lỗi [5] - Thường do nội dung prompt hoặc ảnh tham chiếu vi phạm chính sách kiểm duyệt an toàn của Google, hoặc tài khoản bị giới hạn).",
+    "details": "RpcError: ('s0x08', [5])",
+    "retryable": false,
+    "upstream_code": "5"
+  },
+  "installation_id": "profile_default"
+}
+```
+
+### 4.3. Bảng Mã Lỗi Chuẩn V1 (`V1ErrorCode`)
+
+| Mã Lỗi (`code`) | HTTP Status | Nguyên Nhân | Hành Động Khắc Phục (`action`) |
+|---|---|---|---|
+| **`SAFETY_OR_POLICY_VIOLATION`** | `422` / `502` | Nội dung prompt hoặc ảnh tham chiếu vi phạm bộ lọc an toàn/kiểm duyệt của Google Flow (mã RPC `[5]`). | Thay đổi từ ngữ prompt trung tính hơn, giảm bớt chi tiết nhạy cảm/bạo lực, hoặc đổi ảnh tham chiếu. |
+| **`QUOTA_EXCEEDED`** | `429` | Tài khoản Google Flow đã dùng hết hạn mức tạo ảnh/video trong ngày (mã RPC `[8]`). | Chờ sang ngày hôm sau để hệ thống reset quota hoặc chuyển sang profile/tài khoản Google khác. |
+| **`SESSION_EXPIRED`** | `401` | Phiên đăng nhập Google Flow đã hết hạn hoặc cookie/token AT/WIZ không khả dụng. | Mở lại tab `flow.google.com` trên Chrome, tải lại trang (F5) và đăng nhập lại tài khoản Google. |
+| **`PERMISSION_DENIED`** | `403` | Tài khoản Google Flow hiện tại không có quyền truy cập vào project hoặc tính năng này. | Kiểm tra quyền của tài khoản Google trên tab Google Flow. |
+| **`NO_FLOW_TAB`** | `503` | Không tìm thấy bất kỳ tab `flow.google.com` nào đang mở trên trình duyệt Chrome. | Mở một tab `https://flow.google.com` trên trình duyệt Chrome và giữ tab mở. |
+| **`EXTENSION_NOT_CONNECTED`**| `503` | Chrome extension FlowKit chưa kết nối tới backend server. | Khởi động trình duyệt Chrome có cài extension FlowKit và kiểm tra trạng thái kết nối. |
+| **`CAPTCHA_FAILED`** | `502` | Không giải được token reCAPTCHA Enterprise từ tab Google Flow (do timeout hoặc grecaptcha chưa tải xong). | Đảm bảo tab `flow.google.com` không bị đơ/lag hoặc reload lại tab Flow. |
+| **`UPSTREAM_NO_RESPONSE`** | `502` | Google Flow không phản hồi envelope kết quả RPC hợp lệ (do gián đoạn mạng hoặc Flow bảo trì). | Kiểm tra đường truyền mạng và tab Flow rồi thử lại. |
+| **`MEDIA_NOT_GENERATED`** | `502` | Google Flow hoàn tất xử lý nhưng không sinh ra link media (do bị hậu kiểm hủy kết quả hoặc lỗi render). | Thử lại với prompt khác hoặc điều chỉnh độ dài/tỷ lệ video. |
+| **`TIMEOUT`** | `504` | Quá thời gian chờ tối đa (180s - 300s) mà Google Flow chưa render xong. | Google Flow có thể đang quá tải hàng đợi, vui lòng thử lại sau vài phút. |
+| **`IMAGE_DOWNLOAD_FAILED`** | `400` | Không thể tải ảnh gốc từ `image_url` cung cấp trong request body. | Kiểm tra URL ảnh có truy cập công khai trực tiếp được không. |
+| **`INVALID_ARGUMENT`** | `400` | Tham số gửi tới Google Flow không hợp lệ (mã lỗi `[3]`). | Kiểm tra định dạng aspect_ratio, model, resolution hoặc prompt. |
+| **`JOB_NOT_FOUND`** | `404` | Không tìm thấy mã `job_id` trong hệ thống cơ sở dữ liệu. | Kiểm tra lại tính chính xác của `job_id`. |
+| **`MAINTENANCE`** | `503` | Hệ thống đang bật chế độ bảo trì `CLIENT_MAINTENANCE=True`. | Tạm dừng gọi API và thử lại sau thời gian chỉ định trong header `Retry-After: 60`. |
 
 ---
 

@@ -733,25 +733,11 @@ async function reviveTabIfNeeded(tab) {
   }
 }
 
-/** Ensure Flow tab is active and its window is visible/restored.
- *  reCAPTCHA Enterprise scores hidden/minimized windows poorly or hangs. */
+/** Keep Flow tab running quietly in background without stealing focus or popping up.
+ *  Preserves user workflow so the tab does not jump to foreground on every job. */
 async function activateTabForCaptcha(tab) {
-  try {
-    if (tab?.windowId) {
-      const win = await chrome.windows.get(tab.windowId);
-      if (win.state === 'minimized') {
-        await chrome.windows.update(tab.windowId, { state: 'normal', focused: true });
-      } else if (!win.focused) {
-        await chrome.windows.update(tab.windowId, { focused: true });
-      }
-    }
-    if (tab?.id && !tab.active) {
-      await chrome.tabs.update(tab.id, { active: true });
-    }
-    await sleep(300);
-  } catch (e) {
-    console.debug('[FlowAgent] activateTabForCaptcha:', e?.message);
-  }
+  // Do not steal focus or force active: true on every job.
+  // Tab executes grecaptcha in background without interrupting the user.
 }
 
 function captchaFromTab(tabId, requestId, captchaAction) {
