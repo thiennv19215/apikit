@@ -660,11 +660,27 @@ async function mintCaptchaInPage(tabId, pageAction) {
         let release;
         globalThis[tailKey] = new Promise((resolve) => { release = resolve; });
         try {
+          // Proactively inject reCAPTCHA Enterprise script if not yet loaded in DOM
+          if (!globalThis.grecaptcha?.enterprise?.execute) {
+            const existing = document.querySelector('script[src*="recaptcha/enterprise.js"]');
+            if (!existing) {
+              const s = document.createElement('script');
+              s.src = `https://www.google.com/recaptcha/enterprise.js?render=${siteKey}`;
+              s.async = true;
+              (document.head || document.documentElement).appendChild(s);
+            }
+          }
+
           const deadline = Date.now() + 22000;
           while (!globalThis.grecaptcha?.enterprise?.execute) {
             if (Date.now() >= deadline) return { error: 'grecaptcha not available' };
-            await new Promise((resolve) => setTimeout(resolve, 200));
+            await new Promise((resolve) => setTimeout(resolve, 150));
           }
+
+          if (typeof globalThis.grecaptcha.enterprise.ready === 'function') {
+            await new Promise((res) => globalThis.grecaptcha.enterprise.ready(res));
+          }
+
           const token = await globalThis.grecaptcha.enterprise.execute(siteKey, { action });
           return token ? { token } : { error: 'NO_TOKEN' };
         } catch (error) {
@@ -768,7 +784,18 @@ async function solveCaptcha(requestId, captchaAction) {
     try {
       const resp = await captchaFromTab(tab.id, requestId, captchaAction);
       if (!resp?.token) {
-        errors.push(resp?.error || 'NO_TOKEN');
+        const err = resp?.error || 'NO_TOKEN';
+        errors.push(err);
+        // If background execution failed due to throttling or grecaptcha missing,
+        // retry once with gentle internal tab switch (WITHOUT window focus / without popping up)
+        if (err === 'grecaptcha not available' || err === 'NO_TOKEN') {
+          try {
+            await chrome.tabs.update(tab.id, { active: true });
+            await sleep(600);
+            const retryResp = await captchaFromTab(tab.id, requestId, captchaAction);
+            if (retryResp?.token) return retryResp;
+          } catch (_) {}
+        }
         continue;
       }
       return resp;
@@ -797,7 +824,18 @@ async function solveCaptcha(requestId, captchaAction) {
     const target = await chrome.tabs.get(recoveryTab.id).catch(() => null);
     if (!target || target.discarded) return { error: 'NO_FLOW_TAB' };
     await activateTabForCaptcha(target);
-    return await captchaFromTab(target.id, requestId, captchaAction);
+    const recoveryResp = await captchaFromTab(target.id, requestId, captchaAction);
+    if (recoveryResp?.token) return recoveryResp;
+    // If background minting failed on fresh tab, gentle internal tab switch as last resort
+    if (recoveryResp?.error === 'grecaptcha not available' || recoveryResp?.error === 'NO_TOKEN') {
+      try {
+        await chrome.tabs.update(target.id, { active: true });
+        await sleep(600);
+        const retryResp = await captchaFromTab(target.id, requestId, captchaAction);
+        if (retryResp?.token) return retryResp;
+      } catch (_) {}
+    }
+    return recoveryResp;
   } catch (e) {
     const msg = e?.message || errors[0] || 'NO_FLOW_TAB';
     return { error: msg.includes('No current window') ? 'NO_FLOW_TAB' : msg };

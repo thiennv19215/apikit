@@ -73,13 +73,31 @@ window.addEventListener('GET_CAPTCHA', async ({ detail }) => {
   }
 });
 
+function ensureGrecaptchaScript() {
+  if (window.grecaptcha?.enterprise?.execute) return;
+  const existing = document.querySelector('script[src*="recaptcha/enterprise.js"]');
+  if (!existing) {
+    const s = document.createElement('script');
+    s.src = `https://www.google.com/recaptcha/enterprise.js?render=${SITE_KEY}`;
+    s.async = true;
+    (document.head || document.documentElement).appendChild(s);
+  }
+}
+
 function waitForGrecaptcha(timeout = 22000) {   // it loads lazily; 10s was optimistic
   return new Promise((resolve, reject) => {
+    ensureGrecaptchaScript();
     const start = Date.now();
     const check = () => {
-      if (window.grecaptcha?.enterprise?.execute) return resolve();
+      if (window.grecaptcha?.enterprise?.execute) {
+        if (typeof window.grecaptcha.enterprise.ready === 'function') {
+          window.grecaptcha.enterprise.ready(() => resolve());
+          return;
+        }
+        return resolve();
+      }
       if (Date.now() - start > timeout) return reject(new Error('grecaptcha not available'));
-      setTimeout(check, 200);
+      setTimeout(check, 150);
     };
     check();
   });
