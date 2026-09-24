@@ -1,5 +1,7 @@
 """Direct Flow API endpoints — for manual operations outside the queue."""
-from fastapi import APIRouter, HTTPException, Response
+import base64
+import mimetypes
+from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile
 from pydantic import BaseModel, Field
 from typing import Literal, Optional
 
@@ -104,11 +106,30 @@ class UpscaleVideoRequest(BaseModel):
 
 
 class UploadImageRequest(BaseModel):
-    file_path: Optional[str] = None  # absolute path to local image file on FlowKit server
-    image_base64: Optional[str] = None  # base64 encoded image string (allows remote server uploads)
-    mime_type: Optional[str] = None
-    project_id: str = ""
-    file_name: str = "image.png"
+    image_base64: Optional[str] = Field(
+        default=None,
+        description=(
+            "Recommended for external/API callers. Base64-encoded image bytes; "
+            "avoids filesystem namespace and permission issues."
+        ),
+    )
+    file_path: Optional[str] = Field(
+        default=None,
+        description=(
+            "Server-local convenience mode only. The path is opened by the FlowKit "
+            "service user and must be visible/readable inside its systemd namespace. "
+            "Caller-local /tmp and protected home paths may not be accessible."
+        ),
+    )
+    mime_type: Optional[str] = Field(
+        default=None,
+        description="Optional MIME override; otherwise inferred from file_name/file_path.",
+    )
+    project_id: str = Field(
+        default="",
+        description="Existing Flow project id, or empty to use/create the session project.",
+    )
+    file_name: str = Field(default="image.png", description="Filename sent to Google Flow.")
 
 
 class CheckStatusRequest(BaseModel):
@@ -519,54 +540,157 @@ async def export_image(body: UpscaleImageRequest):
     )
 
 
-@router.post("/upload-image")
+async def _upload_image_bytes(
+    client,
+    image_bytes: bytes,
+    *,
+    project_id: str,
+    mime_type: str,
+    file_name: str,
+) -> dict:
+    """Upload bytes through the shared Flow path and return the public response."""
+    if not image_bytes:
+        raise HTTPException(422, "image payload is empty")
+    resolved_project_id = await _resolve_direct_project(client, project_id)
+    b64 = base64.b64encode(image_bytes).decode()
+    result = await client.upload_image(
+        b64,
+        mime_type=mime_type,
+        project_id=resolved_project_id,
+        file_name=file_name,
+    )
+    if result.get("error") or (
+        isinstance(result.get("status"), int) and result["status"] >= 400
+    ):
+        raise HTTPException(
+            result.get("status", 502),
+            result.get("error", result.get("data")),
+        )
+    media_id = result.get("_mediaId")
+    return {
+        "media_id": media_id,
+        "project_id": resolved_project_id,
+        "raw": result.get("data", result),
+    }
+
+
+def _read_server_local_image(file_path: str) -> bytes:
+    """Read a path from FlowKit's own service namespace with useful API errors."""
+    try:
+        with open(file_path, "rb") as f:
+            return f.read()
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            404,
+            (
+                "Server-local file is not visible to the FlowKit service: "
+                f"{file_path}. External callers should use image_base64 or "
+                "/api/flow/upload-image-file; caller-local /tmp paths may be hidden "
+                "by systemd PrivateTmp."
+            ),
+        ) from exc
+    except PermissionError as exc:
+        raise HTTPException(
+            403,
+            (
+                "File is not readable by FlowKit service: "
+                f"{file_path}. The path must be readable by the service user; "
+                "external callers should use image_base64 or /api/flow/upload-image-file."
+            ),
+        ) from exc
+    except IsADirectoryError as exc:
+        raise HTTPException(422, f"file_path is a directory, not an image file: {file_path}") from exc
+    except OSError as exc:
+        raise HTTPException(422, f"Could not read server-local file {file_path}: {exc}") from exc
+
+
+@router.post(
+    "/upload-image",
+    summary="Upload image bytes or a server-local image",
+    description=(
+        "JSON upload endpoint. External/API callers should send image_base64. "
+        "file_path is a server-local convenience mode only: the path is opened by "
+        "the FlowKit service user and must be visible inside its systemd namespace."
+    ),
+)
 async def upload_image(body: UploadImageRequest):
-    """Upload a local image file or base64 image to Google Flow and get a media_id."""
-    import base64, mimetypes, re
-    from pathlib import Path
+    """Upload image bytes to Google Flow; prefer image_base64 for external callers."""
+    client = get_flow_client()
+    if not client.connected:
+        raise HTTPException(503, "Extension not connected")
+    if body.image_base64:
+        try:
+            image_bytes = base64.b64decode(body.image_base64, validate=True)
+        except Exception as exc:
+            raise HTTPException(422, "image_base64 is not valid base64") from exc
+        if not image_bytes:
+            raise HTTPException(422, "image_base64 is empty")
+        mime = body.mime_type or mimetypes.guess_type(body.file_name)[0] or "image/png"
+    elif body.file_path:
+        image_bytes = _read_server_local_image(body.file_path)
+        if not image_bytes:
+            raise HTTPException(422, f"Server-local image is empty: {body.file_path}")
+        mime = body.mime_type or mimetypes.guess_type(body.file_path)[0] or "image/png"
+    else:
+        raise HTTPException(
+            422,
+            "image_base64 is recommended; alternatively provide server-local file_path",
+        )
+
+    return await _upload_image_bytes(
+        client,
+        image_bytes,
+        project_id=body.project_id,
+        mime_type=mime,
+        file_name=body.file_name,
+    )
+
+
+@router.post(
+    "/upload-image-file",
+    summary="Upload an image file with multipart/form-data",
+    description=(
+        "Recommended direct-file endpoint for external callers. The uploaded bytes are "
+        "read from the HTTP request, so the caller does not need to share a filesystem "
+        "namespace with the FlowKit service. Leave project_id empty to use/create the "
+        "session project."
+    ),
+)
+async def upload_image_file(
+    file: UploadFile = File(..., description="Image file bytes from the caller."),
+    project_id: str = Form(
+        default="",
+        description="Existing Flow project id, or empty to use/create the session project.",
+    ),
+    file_name: Optional[str] = Form(
+        default=None,
+        description="Optional filename override sent to Google Flow.",
+    ),
+    mime_type: Optional[str] = Form(
+        default=None,
+        description="Optional MIME override; defaults to upload Content-Type or filename inference.",
+    ),
+):
+    """Upload a multipart file without requiring server-local filesystem access."""
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
 
-    if not body.file_path and not body.image_base64:
-        raise HTTPException(400, "Either file_path or image_base64 must be provided")
+    image_bytes = await file.read()
+    if not image_bytes:
+        raise HTTPException(422, "uploaded image file is empty")
+    resolved_name = file_name or file.filename or "image.png"
+    resolved_mime = (
+        mime_type
+        or file.content_type
+        or mimetypes.guess_type(resolved_name)[0]
+        or "image/png"
+    )
+    return await _upload_image_bytes(
+        client,
+        image_bytes,
+        project_id=project_id,
+        mime_type=resolved_mime,
+        file_name=resolved_name,
+    )
 
-    b64 = None
-    mime = body.mime_type
-    file_name = body.file_name or "image.png"
-
-    if body.image_base64:
-        raw_b64 = body.image_base64.strip()
-        if raw_b64.startswith("data:"):
-            match = re.match(r"^data:([^;]+);base64,(.+)$", raw_b64, re.DOTALL)
-            if match:
-                if not mime:
-                    mime = match.group(1).strip()
-                b64 = match.group(2).strip()
-            else:
-                parts = raw_b64.split(",", 1)
-                b64 = parts[1].strip() if len(parts) > 1 else raw_b64
-        else:
-            b64 = raw_b64
-        if not mime:
-            mime = "image/png"
-    elif body.file_path:
-        try:
-            with open(body.file_path, "rb") as f:
-                image_bytes = f.read()
-        except FileNotFoundError:
-            raise HTTPException(404, f"File not found: {body.file_path}")
-        b64 = base64.b64encode(image_bytes).decode("utf-8")
-        if not mime:
-            mime = mimetypes.guess_type(body.file_path)[0] or "image/png"
-        if body.file_name == "image.png":
-            name = Path(body.file_path).name
-            if name:
-                file_name = name
-
-    project_id = await _resolve_direct_project(client, body.project_id)
-    result = await client.upload_image(b64, mime_type=mime, project_id=project_id, file_name=file_name)
-    if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
-        raise HTTPException(result.get("status", 502), result.get("error", result.get("data")))
-    media_id = result.get("_mediaId") or result.get("data", {}).get("media", {}).get("name")
-    return {"media_id": media_id, "raw": result.get("data", result)}
