@@ -763,14 +763,22 @@ function captchaFromTab(tabId, requestId, captchaAction) {
   ]);
 }
 
-async function solveCaptcha(requestId, captchaAction) {
-  let tabs = await chrome.tabs.query({ url: flowUrls });
+async function solveCaptcha(requestId, captchaAction, targetTab = null) {
+  let tabs = targetTab ? [targetTab] : await chrome.tabs.query({ url: flowUrls });
 
-  // No Flow tab at all — try to spawn one if a browser window exists.
+  // No Flow tab at all — spawn one and let it settle. Keep the exact tab id:
+  // a redirected or stale tab must not make us select some older candidate.
   if (!tabs.length) {
-    const freshTab = await openOrGetFlowTab({ createIfMissing: true });
-    if (!freshTab) return { error: 'NO_FLOW_TAB' };
-    tabs = [freshTab];
+    let opened;
+    try {
+      opened = await chrome.tabs.create({ url: FLOW_TAB_URL, active: false });
+      await sleep(3000);
+    } catch (e) {
+      return { error: e.message || 'NO_FLOW_TAB' };
+    }
+    const target = opened?.id ? await chrome.tabs.get(opened.id).catch(() => null) : null;
+    if (!target) return { error: 'NO_FLOW_TAB' };
+    tabs = [target];
   }
 
   // Try each Flow tab in turn. A tab that answers "no grecaptcha" is a tab
@@ -780,22 +788,10 @@ async function solveCaptcha(requestId, captchaAction) {
   for (const candidate of tabs) {
     const tab = await reviveTabIfNeeded(candidate);
     if (!tab) continue;
-    await activateTabForCaptcha(tab);
     try {
       const resp = await captchaFromTab(tab.id, requestId, captchaAction);
       if (!resp?.token) {
-        const err = resp?.error || 'NO_TOKEN';
-        errors.push(err);
-        // If background execution failed due to throttling or grecaptcha missing,
-        // retry once with gentle internal tab switch (WITHOUT window focus / without popping up)
-        if (err === 'grecaptcha not available' || err === 'NO_TOKEN') {
-          try {
-            await chrome.tabs.update(tab.id, { active: true });
-            await sleep(600);
-            const retryResp = await captchaFromTab(tab.id, requestId, captchaAction);
-            if (retryResp?.token) return retryResp;
-          } catch (_) {}
-        }
+        errors.push(resp?.error || 'NO_TOKEN');
         continue;
       }
       return resp;
@@ -815,33 +811,20 @@ async function solveCaptcha(requestId, captchaAction) {
     }
   }
 
-  // Every candidate failed — try one disposable tab without re-selecting a stale tab.
+  // Every candidate failed — last-ditch, spawn a fresh temporary tab and
+  // target THAT exact tab.
   let recoveryTab = null;
   try {
-    recoveryTab = await safeCreateTab(FLOW_TAB_URL, false);
-    if (!recoveryTab?.id) return { error: 'NO_FLOW_TAB' };
+    recoveryTab = await chrome.tabs.create({ url: FLOW_TAB_URL, active: false });
     await sleep(3000);
-    const target = await chrome.tabs.get(recoveryTab.id).catch(() => null);
+    const target = await chrome.tabs.get(recoveryTab.id);
     if (!target || target.discarded) return { error: 'NO_FLOW_TAB' };
-    await activateTabForCaptcha(target);
-    const recoveryResp = await captchaFromTab(target.id, requestId, captchaAction);
-    if (recoveryResp?.token) return recoveryResp;
-    // If background minting failed on fresh tab, gentle internal tab switch as last resort
-    if (recoveryResp?.error === 'grecaptcha not available' || recoveryResp?.error === 'NO_TOKEN') {
-      try {
-        await chrome.tabs.update(target.id, { active: true });
-        await sleep(600);
-        const retryResp = await captchaFromTab(target.id, requestId, captchaAction);
-        if (retryResp?.token) return retryResp;
-      } catch (_) {}
-    }
-    return recoveryResp;
+    return await captchaFromTab(target.id, requestId, captchaAction);
   } catch (e) {
-    const msg = e?.message || errors[0] || 'NO_FLOW_TAB';
-    return { error: msg.includes('No current window') ? 'NO_FLOW_TAB' : msg };
+    return { error: e?.message || errors[0] || 'NO_FLOW_TAB' };
   } finally {
     if (recoveryTab?.id) {
-      try { await chrome.tabs.remove(recoveryTab.id); } catch (_) {}
+      try { await chrome.tabs.remove(recoveryTab.id); } catch { /* already gone */ }
     }
   }
 }
@@ -875,17 +858,29 @@ const CAPTCHA_SLOT = '__CAPTCHA__';
 const MAX_RPC_TEXT = 32000000; // the project listing alone is past 17 MB
 
 async function runBatchRpc(cmd) {
-  if (!flowProjectId) {
-    await detectFlowProjectId();
+  const tabs = await chrome.tabs.query({ url: flowUrls });
+  let candidate = tabs.find((t) => !t.discarded) || tabs[0];
+  if (!candidate) {
+    // No Flow tab — open one and give the app a moment to boot, otherwise
+    // WIZ_global_data is not on the page yet and `at` comes back empty. Keep
+    // the exact created tab id so redirects/stale tabs cannot hijack recovery.
+    let opened;
+    try {
+      opened = await chrome.tabs.create({ url: FLOW_TAB_URL, active: false });
+      await sleep(5000);
+      candidate = opened?.id ? await chrome.tabs.get(opened.id).catch(() => null) : null;
+    } catch (e) {
+      return { error: e?.message || 'NO_FLOW_TAB' };
+    }
+    if (!candidate) return { error: 'NO_FLOW_TAB' };
   }
-  const tab = await openOrGetFlowTab({ createIfMissing: true });
-  if (!tab) {
-    return { error: 'NO_FLOW_TAB' };
-  }
+  // Chrome discards backgrounded tabs; executeScript throws on a dead one.
+  const tab = await reviveTabIfNeeded(candidate);
+  if (!tab) return { error: 'FLOW_TAB_DISCARDED' };
 
   let freq = cmd.freq;
   if (cmd.captchaAction) {
-    const solved = await solveCaptcha(cmd.id, cmd.captchaAction);
+    const solved = await solveCaptcha(cmd.id, cmd.captchaAction, tab);
     if (!solved?.token) return { error: `CAPTCHA_FAILED: ${solved?.error || 'no token'}` };
     freq = freq.split(CAPTCHA_SLOT).join(solved.token);
   }
