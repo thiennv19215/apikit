@@ -508,7 +508,6 @@ async def generate_image(
 ):
     """Generate images directly with Banana Pro / Banana 2 (synchronous 200 OK)."""
     client = get_flow_client()
-    _ensure_v1_routing_ready(client)
 
     header_val = idempotency_header if isinstance(idempotency_header, str) else None
     idempotency_key = _resolve_idempotency_key(header_val, payload.idempotency_key)
@@ -628,7 +627,6 @@ async def generate_video(
 ):
     """Generate videos with Omni Flash (asynchronous 200 OK, returns job_id for polling)."""
     client = get_flow_client()
-    _ensure_v1_routing_ready(client)
     header_val = idempotency_header if isinstance(idempotency_header, str) else None
     idempotency_key = _resolve_idempotency_key(header_val, payload.idempotency_key)
     is_ref_based = payload.type in ("reference_to_video", "ingredients", "references", "omni", "r2v")
