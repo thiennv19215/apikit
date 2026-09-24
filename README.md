@@ -888,3 +888,10 @@ MIT
 - Right way to build Mobile Application + System
 
 → **[facebook.com/groups/vibecodeera](https://www.facebook.com/groups/vibecodeera)**
+
+
+---
+
+## Apikit upstream sync boundary
+
+This repository tracks the shared implementation from `crisng95/flowkit`, while Apikit owns its public V1 contract. FlowKit core updates should be merged normally; `agent/api/v1/**`, the V1 SDK/MCP surface, V1 docs, and V1 contract tests remain Apikit-owned. See [docs/UPSTREAM_SYNC.md](docs/UPSTREAM_SYNC.md).
