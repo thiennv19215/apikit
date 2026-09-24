@@ -62,6 +62,21 @@ def _ensure_v1_routing_ready(client):
     return profile_router
 
 
+async def _resolve_v1_route(client, payload: dict):
+    """Resolve Apikit V1 profile/project affinity before calling FlowKit core."""
+    profile_router = _ensure_v1_routing_ready(client)
+    try:
+        route = await profile_router.resolve_context(payload)
+    except V1RoutingError as exc:
+        raise_v1_http_error(
+            str(exc),
+            status_code=503 if exc.code == "PROFILE_UNAVAILABLE" else 409,
+            default_message="Không thể chọn tài khoản Flow phù hợp cho yêu cầu này.",
+            default_action="Kiểm tra extension/profile, quota hoặc upload lại ảnh trên cùng tài khoản.",
+        )
+    return profile_router, route
+
+
 def _wake_worker() -> None:
     """Start queued v1 work immediately when the worker has capacity."""
     try:
@@ -508,8 +523,12 @@ async def generate_image(
     aspect = _normalize_image_aspect(payload.aspect_ratio)
     orientation = "HORIZONTAL" if "LANDSCAPE" in aspect else "VERTICAL"
     model = normalize_image_model(payload.model or "NANO_BANANA_PRO")
-    inst_id = payload.installation_id
-    pid = payload.project_id or ""
+    _, route = await _resolve_v1_route(client, {
+        "installation_id": payload.installation_id,
+        "project_id": payload.project_id or "",
+    })
+    inst_id = route.installation_id
+    pid = route.project_id
 
     ref_media_ids = []
     if payload.input_images:
@@ -628,8 +647,12 @@ async def generate_video(
     duration = payload.duration_seconds
     resolution = getattr(payload, "resolution", "720p") or "720p"
     seed = getattr(payload, "seed", None)
-    inst_id = payload.installation_id
-    pid = payload.project_id or ""
+    _, route = await _resolve_v1_route(client, {
+        "installation_id": payload.installation_id,
+        "project_id": payload.project_id or "",
+    })
+    inst_id = route.installation_id
+    pid = route.project_id
 
     is_t2v = payload.type in ("text_to_video", "t2v", "text")
     start_mid = payload.start_media_id
@@ -846,22 +869,29 @@ async def upscale_image(
     Returns JSON with encodedImage base64 data, or raw binary JPEG if download=True or Accept: image/jpeg.
     """
     client = get_flow_client()
+    _, route = await _resolve_v1_route(client, {
+        "installation_id": payload.installation_id,
+        "project_id": payload.project_id or "",
+        "base_media_id": payload.media_id,
+    })
     media_id = payload.media_id
+    route_inst_id = route.installation_id
+    route_project_id = route.project_id
 
     if not media_id and (payload.image_base64 or payload.image_url):
         media_id, _ = await _resolve_media_id_from_input(
             client,
             image_base64=payload.image_base64,
             image_url=payload.image_url,
-            project_id=payload.project_id or "",
-            preferred_installation=payload.installation_id,
+            project_id=route_project_id,
+            preferred_installation=route_inst_id,
         )
 
     result = await client.upscale_image(
         media_id=media_id,
-        project_id=payload.project_id,
+        project_id=route_project_id,
         resolution=payload.quality,
-        preferred_installation=payload.installation_id,
+        preferred_installation=route_inst_id,
     )
 
     if result.get("error"):
@@ -911,8 +941,13 @@ async def edit_image(
     aspect = _normalize_image_aspect(payload.aspect_ratio)
     orientation = "HORIZONTAL" if "LANDSCAPE" in aspect else "VERTICAL"
     model = normalize_image_model(payload.model or "NANO_BANANA_PRO")
-    inst_id = payload.installation_id
-    pid = payload.project_id or ""
+    _, route = await _resolve_v1_route(client, {
+        "installation_id": payload.installation_id,
+        "project_id": payload.project_id or "",
+        "base_media_id": payload.base_media_id,
+    })
+    inst_id = route.installation_id
+    pid = route.project_id
 
     base_mid, inst_id = await _resolve_media_id_from_input(
         client,
