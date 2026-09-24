@@ -43,6 +43,7 @@ RPC_GEN_VIDEO_REFERENCES = "MZZa6b"
 RPC_GEN_VIDEO_REFS = RPC_GEN_VIDEO_REFERENCES
 RPC_GEN_VIDEO_START_END = RPC_GEN_VIDEO_FIRST_LAST
 RPC_OPERATION = "jwpduf"
+RPC_CREATE_PROJECT = "jHPbke"
 RPC_PROJECT_MEDIA = "Zzl0ze"
 RPC_MEDIA = "as29s"
 RPC_UPLOAD_IMAGE = "maseQ"
@@ -559,20 +560,55 @@ def omni_reference_video_request(prompt: str, project_id: str,
 
 def text_video_request(prompt: str, project_id: str,
                        aspect: Any = VIDEO_ASPECT_LANDSCAPE,
-                       model: str = "abra_t2v_4s") -> str:
-    """Build the migrated text-to-video submit (YhhmEf)."""
+                       model: str = "abra_t2v_4s",
+                       resolution: str | None = None) -> str:
+    """Build the current text-to-video submit (YhhmEf).
+
+    Flow encodes 360p in both the model key (``*_360p``) and the low-resolution
+    option slot. Current UI also uses client descriptor type 2 for video submits.
+    """
+    resolved_model = str(model)
+    res = (
+        "360p" if resolution is None and resolved_model.endswith("_360p")
+        else "720p" if resolution is None
+        else str(resolution).strip().lower()
+    )
+    if res not in {"360p", "720p"}:
+        raise ValueError("Omni resolution must be 360p or 720p")
+    if res == "360p" and not resolved_model.endswith("_360p"):
+        resolved_model += "_360p"
+    if res == "720p" and resolved_model.endswith("_360p"):
+        resolved_model = resolved_model.removesuffix("_360p")
     request = [
         [None, None, [[[prompt]]]],
-        model,
+        resolved_model,
         resolve_video_aspect(aspect),
         None,
         [None, None, None, None, _client_uuid(), _client_uuid()],
     ]
+    if res == "360p":
+        request.extend([None, None, [4]])
     return build_envelope(RPC_GEN_VIDEO_TEXT, [
         [request],
         _context(project_id),
-        [_client_uuid(), 1],
+        [_client_uuid(), 2],
     ])
+
+
+def create_project_request(title: str) -> str:
+    """Create a current Flow project (captured from flow.google.com UI)."""
+    clean = " ".join(str(title or "FlowKit project").split())[:160] or "FlowKit project"
+    return build_envelope(
+        RPC_CREATE_PROJECT,
+        ["projects/*", [None, [clean]], [None, SURFACE_ID]],
+    )
+
+
+def read_created_project(payload: Any) -> tuple[str, str | None]:
+    if not isinstance(payload, list) or not payload or not isinstance(payload[0], str):
+        raise FlowBatchError("project create response did not contain a project id")
+    title = payload[1][0] if len(payload) > 1 and isinstance(payload[1], list) and payload[1] else None
+    return payload[0], title if isinstance(title, str) else None
 
 
 def video_refs_request(prompt: str, project_id: str,

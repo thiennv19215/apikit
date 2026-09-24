@@ -181,6 +181,7 @@ async def generate_omni_flash_text_video(
     scene_id: str = "",
     duration_s: int = 8,
     aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
+    resolution: str = "720p",
     user_paygate_tier: str = "PAYGATE_TIER_ONE",
     seed: int | None = None,
     preferred_installation: str | None = None,
@@ -188,6 +189,7 @@ async def generate_omni_flash_text_video(
     """Submit Omni 1.1 Flash text-to-video on the migrated Flow batch API."""
     _validate_duration(duration_s)
     _validate_aspect(aspect_ratio)
+    resolution = _validate_resolution(resolution)
     client = get_flow_client()
     cand_ws = client._select_extension(
         require_token=False,
@@ -203,8 +205,10 @@ async def generate_omni_flash_text_video(
         if target_inst:
             extra_kwargs["preferred_installation"] = target_inst
             extra_kwargs["preferred_project_id"] = pid
-        model_key = f"abra_t2v_{duration_s}s"
-        freq = fb.text_video_request(prompt, pid, aspect=aspect_ratio, model=model_key)
+        model_key = f"abra_t2v_{duration_s}s" + ("_360p" if resolution == "360p" else "")
+        freq = fb.text_video_request(
+            prompt, pid, aspect=aspect_ratio, model=model_key, resolution=resolution
+        )
         payload = await client._batch_payload(
             fb.RPC_GEN_VIDEO_TEXT, freq, fb.CAPTCHA_VIDEO, timeout=120,
             **extra_kwargs,
@@ -226,6 +230,7 @@ async def generate_omni_flash_text_video(
             "workflows": [workflow],
             "model": model_key,
             "duration_s": duration_s,
+            "resolution": resolution,
             "flowkitPolling": {
                 "mode": "batch_media",
                 "project_id": pid,

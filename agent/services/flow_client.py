@@ -26,6 +26,8 @@ from agent.config import (
     VIDEO_MODELS, UPSCALE_MODELS, IMAGE_MODELS, VIDEO_POLL_TIMEOUT,
     USE_BATCH_RPC, FLOW_PROJECT_ID, FLOW_ALLOW_DEGRADED,
     DEFAULT_PAYGATE_TIER,
+    FLOW_GENERATION_MIN_INTERVAL_S, FLOW_GENERATION_MAX_CONCURRENT,
+    FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S,
 )
 from agent import config as _config
 from agent.services import flow_batch as fb
@@ -79,6 +81,12 @@ class FlowClient:
         self._operation_media: dict[str, str] = {}
         self._operation_polls: dict[str, int] = {}
         self._operation_installations: dict[str, str] = {}
+        self._generation_slots = asyncio.Semaphore(FLOW_GENERATION_MAX_CONCURRENT)
+        self._generation_rate_gate = asyncio.Lock()
+        self._generation_last_submit_at = 0.0
+        self._generation_unusual_until = 0.0
+        self._generation_last_unusual_at: Optional[float] = None
+        self._generation_last_unusual_rpc: Optional[str] = None
         # WS stats
         self._ws_connect_count = 0
         self._ws_disconnect_count = 0
@@ -367,6 +375,16 @@ class FlowClient:
             "connects": self._ws_connect_count,
             "disconnects": self._ws_disconnect_count,
             "uptime_s": uptime,
+        }
+
+    @property
+    def generation_guard_status(self) -> dict:
+        remaining = max(0.0, self._generation_unusual_until - time.monotonic())
+        return {
+            "cooldown_active": remaining > 0,
+            "cooldown_remaining_s": round(remaining, 3),
+            "last_unusual_activity_at": self._generation_last_unusual_at,
+            "last_unusual_activity_rpc": self._generation_last_unusual_rpc,
         }
 
     async def handle_message(self, data: dict, websocket=None):
@@ -771,19 +789,74 @@ class FlowClient:
                         preferred_project_id: str | None = None) -> dict:
         """Run one batchexecute RPC in the Flow page. Returns the raw body.
 
-        ``match`` asks the extension to cut the response down to an 800-byte
-        window around that string before handing it back. The project listing
-        is tens of megabytes for the one entry we want, and the cheapest place
-        to throw the rest away is inside the tab.
+        CAPTCHA-bearing image/video submits pass through one process-wide guard
+        so direct API callers cannot accidentally bypass the worker limiter.
+        Non-generation RPCs (polling/media/project metadata) remain unthrottled.
         """
         params: dict = {"rpcid": rpcid, "freq": freq}
         if captcha_action:
             params["captchaAction"] = captcha_action
         if match:
             params["match"] = match
-        return await self._send("batch_rpc", params, timeout=timeout,
-                                preferred_installation=preferred_installation,
-                                preferred_project_id=preferred_project_id)
+
+        is_generation = captcha_action in {fb.CAPTCHA_IMAGE, fb.CAPTCHA_VIDEO}
+        if not is_generation:
+            return await self._send("batch_rpc", params, timeout=timeout,
+                                    preferred_installation=preferred_installation,
+                                    preferred_project_id=preferred_project_id)
+
+        now = time.monotonic()
+        if now < self._generation_unusual_until:
+            remaining = max(1, int(self._generation_unusual_until - now + 0.999))
+            return {
+                "status": 429,
+                "error": (
+                    "PUBLIC_ERROR_UNUSUAL_ACTIVITY local cooldown active; "
+                    f"retry in about {remaining}s"
+                ),
+            }
+
+        await self._generation_slots.acquire()
+        try:
+            async with self._generation_rate_gate:
+                now = time.monotonic()
+                if now < self._generation_unusual_until:
+                    remaining = max(1, int(self._generation_unusual_until - now + 0.999))
+                    return {
+                        "status": 429,
+                        "error": (
+                            "PUBLIC_ERROR_UNUSUAL_ACTIVITY local cooldown active; "
+                            f"retry in about {remaining}s"
+                        ),
+                    }
+                delay = FLOW_GENERATION_MIN_INTERVAL_S - (
+                    now - self._generation_last_submit_at
+                )
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                self._generation_last_submit_at = time.monotonic()
+
+            result = await self._send("batch_rpc", params, timeout=timeout,
+                                      preferred_installation=preferred_installation,
+                                      preferred_project_id=preferred_project_id)
+            blob = f"{result.get('error', '')} {result.get('data', '')}"
+            if (
+                "PUBLIC_ERROR_UNUSUAL_ACTIVITY" in blob
+                or "unusual activity" in blob.lower()
+            ):
+                self._generation_unusual_until = max(
+                    self._generation_unusual_until,
+                    time.monotonic() + FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S,
+                )
+                self._generation_last_unusual_at = time.time()
+                self._generation_last_unusual_rpc = rpcid
+                logger.warning(
+                    "Google unusual-activity block detected; pausing generation submits for %.0fs",
+                    FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S,
+                )
+            return result
+        finally:
+            self._generation_slots.release()
 
     async def _batch_payload(self, rpcid: str, freq: str,
                              captcha_action: str | None = None,
@@ -897,24 +970,36 @@ class FlowClient:
     # ─── High-level API Methods ──────────────────────────────
 
     def flow_project_id(self, requested: str | None = None) -> str | None:
-        """The Flow project to attach a new Flow Kit project to, if any.
-
-        Project creation went with the labs.google tRPC endpoint the migration
-        unauthenticated, so on the batch path a project is made once in the
-        Flow UI and its uuid supplied here or pinned as FLOW_PROJECT_ID.
-        """
+        """Validate an explicitly requested Flow project id."""
         if requested and self._UUID_RE.match(requested):
             return requested
-        return FLOW_PROJECT_ID or None
+        return None
 
     async def create_project(self, project_title: str, tool_name: str = "PINHOLE") -> dict:
-        if not USE_BATCH_RPC:
-            return await self._legacy_create_project(project_title, tool_name)
-        pid = self.flow_project_id()
-        if not pid:
-            return {"error": _UNSUPPORTED_CREATE_PROJECT}
-        logger.info("Reusing pinned Flow project %s for '%s'", pid[:12], project_title)
-        return {"status": 200, "data": {"projectId": pid}}
+        try:
+            result = await self.batch_rpc(
+                fb.RPC_CREATE_PROJECT,
+                fb.create_project_request(project_title),
+                timeout=60,
+            )
+            if result.get("error"):
+                pid = self.flow_project_id()
+                if pid:
+                    logger.info("Project create RPC failed (%s), reusing pinned Flow project %s", result.get("error"), pid[:12])
+                    return {"status": 200, "data": {"projectId": pid, "title": project_title}}
+                return {"status": result.get("status", 502), "error": result["error"]}
+            payload = fb.first_payload(result.get("data") or "", fb.RPC_CREATE_PROJECT)
+            pid, title = fb.read_created_project(payload)
+            if not self._UUID_RE.match(pid):
+                raise fb.FlowBatchError(f"invalid project id returned by Flow: {pid!r}")
+            logger.info("Flow project created: %s title=%r", pid, title or project_title)
+            return {"status": 200, "data": {"projectId": pid, "title": title or project_title}}
+        except Exception as exc:
+            pid = self.flow_project_id()
+            if pid:
+                logger.info("Project create exception (%s), reusing pinned Flow project %s", exc, pid[:12])
+                return {"status": 200, "data": {"projectId": pid, "title": project_title}}
+            return {"status": 502, "error": f"{type(exc).__name__}: {exc}"}
 
     async def generate_images(self, prompt: str, project_id: str,
                                aspect_ratio: str = "IMAGE_ASPECT_RATIO_PORTRAIT",

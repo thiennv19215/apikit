@@ -27,4 +27,5 @@ pytest_temp/
 .pytest_temp/
 .pytest-tmp*
 .pytest_cache/
+tests_tmp/
 *.zip

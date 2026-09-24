@@ -1103,6 +1103,13 @@ async def _handle_failure(rid: str, req: dict, result: dict, retry_after: dict =
         logger.error("Request %s FAILED permanently: profile unavailable after 3 retries", rid[:8])
         return
 
+    if "public_error_unusual_activity" in error_lower or "unusual activity" in error_lower:
+        await crud.update_request(rid, status="FAILED", error_message=str(error_msg))
+        await _mark_scene_failed(req)
+        logger.error("Request %s FAILED (Google unusual-activity block; manual recovery required): %s",
+                     rid[:8], error_msg)
+        return
+
     if "unsupported_on_batch_api" in error_lower or "failed: [3]" in error_lower or "invalid_argument" in error_lower or "model_access_denied" in error_lower:
         await crud.update_request(rid, status="FAILED", error_message=str(error_msg))
         await _mark_scene_failed(req)
