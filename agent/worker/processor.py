@@ -535,47 +535,22 @@ async def _dispatch_client_v1(req: dict, orientation: str, ops) -> dict:
 
     if payload.get("project_id"):
         pid = payload["project_id"]
-    # request.installation_id is the last actual executor, not a routing lock.
-    inst_id = payload.get("installation_id")
-    if inst_id and hasattr(client, "is_installation_exhausted") and client.is_installation_exhausted(inst_id):
-        inst_id = None
-        pid = None
 
-    # UUID-only inputs must remain on their known owner. Base64 inputs can be
-    # uploaded again on another profile; keep the source bytes across retries.
-    from agent.services.execution_audit import media_owner
-    raw_ids = list(payload.get("reference_media_ids") or []) + list(payload.get("character_media_ids") or [])
-    raw_ids += [payload[key] for key in ("start_media_id", "end_media_id", "base_media_id") if payload.get(key)]
-    raw_ids += [img["media_id"] for img in payload.get("input_images", [])
-                if img.get("media_id") and not img.get("image_base64")]
-    for media_id in dict.fromkeys(raw_ids):
-        owner = await media_owner(media_id)
-        if not owner:
-            return {"error": "MEDIA_OWNER_UNKNOWN: upload the original image again before using this UUID"}
-        if (inst_id and inst_id != owner["installation_id"]) or (pid and pid != owner["project_id"]):
-            return {"error": "MEDIA_ACCOUNT_MISMATCH: inputs must share an owner/project; re-upload the original images"}
-        inst_id, pid = owner["installation_id"], owner["project_id"]
+    # Apikit V1 owns multi-extension routing policy.  Keep the shared worker
+    # focused on execution and delegate profile/quota/media affinity to the
+    # V1 boundary service instead of reaching into FlowClient private state.
+    from agent.services.v1_multi_extension import (
+        V1RoutingError,
+        get_v1_multi_extension_router,
+    )
+    router = get_v1_multi_extension_router(client)
+    try:
+        route = await router.resolve_context(payload)
+    except V1RoutingError as exc:
+        return {"error": str(exc)}
 
-    if hasattr(client, "_select_extension"):
-        from agent.config import USE_BATCH_RPC
-        selected = client._select_extension(not USE_BATCH_RPC, preferred_installation=inst_id, preferred_project_id=pid or None)
-        if selected is None:
-            return {"error": "PROFILE_UNAVAILABLE: no eligible profile"}
-        selected_profile = client._extensions.get(selected, {})
-        selected_inst_id = selected_profile.get("installation_id")
-        if inst_id and selected_inst_id != inst_id:
-            return {"error": "PROFILE_UNAVAILABLE: requested installation is not an eligible authenticated profile"}
-        if pid and not inst_id and selected_profile.get("flow_project_id") != pid:
-            return {"error": "PROFILE_UNAVAILABLE: requested project has no available profile"}
-        if not inst_id:
-            inst_id = selected_inst_id
-        if not inst_id:
-            return {"error": "PROFILE_UNAVAILABLE: selected profile has no installation_id; reconnect the Flow extension"}
-        if not pid:
-            try:
-                pid = client._batch_project_id("", preferred_installation=inst_id)
-            except Exception as e:
-                return {"error": f"PROFILE_UNAVAILABLE: selected profile has no usable Flow project: {e}"}
+    inst_id = route.installation_id
+    pid = route.project_id or pid
 
     # 1. Image Generation & Editing
     if req_type in ("GENERATE_IMAGE", "REGENERATE_IMAGE", "GENERATE_CHARACTER_IMAGE", "EDIT_IMAGE"):

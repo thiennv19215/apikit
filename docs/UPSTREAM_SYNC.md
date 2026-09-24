@@ -49,3 +49,17 @@ those files; do not replace them wholesale if that would remove Apikit behavior.
 
 This policy was established while syncing against
 `crisng95/flowkit@bc051f2308db050b0d987b696c843664d483b515`.
+
+
+## V1 multi-extension ownership
+
+Apikit's multi-extension/profile routing policy for external V1 clients lives behind
+`agent/services/v1_multi_extension.py`. V1 controllers and V1 worker dispatch should use
+that boundary instead of reading FlowClient private connection state directly.
+
+FlowKit Agent/internal `/api/*` behavior must not be coupled to this V1 routing layer.
+The underlying Flow client may retain connection-registry compatibility needed by the current
+runtime, but V1-specific selection, quota affinity and media-owner routing belong to the
+Apikit-owned V1 boundary.
+
+See `docs/V1_MULTI_EXTENSION.md`.

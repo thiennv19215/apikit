@@ -36,11 +36,45 @@ from agent.api.v1.errors import (
 from agent.db import crud
 from agent.db.schema import get_db, _db_lock
 from agent.services.flow_client import get_flow_client
+from agent.services.v1_multi_extension import (
+    V1RoutingError,
+    get_v1_multi_extension_router,
+)
 from agent.worker._parsing import _extract_media_items
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Client API v1"])
+
+
+def _ensure_v1_routing_ready(client):
+    """Return the V1 routing adapter or expose a stable V1 availability error."""
+    profile_router = get_v1_multi_extension_router(client)
+    try:
+        profile_router.ensure_connected()
+    except V1RoutingError as exc:
+        raise_v1_http_error(
+            str(exc),
+            status_code=503,
+            default_message="Chrome extension FlowKit chưa kết nối với backend server.",
+            default_action="Vui lòng mở trình duyệt Chrome có cài extension FlowKit và kiểm tra trạng thái kết nối.",
+        )
+    return profile_router
+
+
+async def _resolve_v1_route(client, payload: dict):
+    """Resolve Apikit V1 profile/project affinity before calling FlowKit core."""
+    profile_router = _ensure_v1_routing_ready(client)
+    try:
+        route = await profile_router.resolve_context(payload)
+    except V1RoutingError as exc:
+        raise_v1_http_error(
+            str(exc),
+            status_code=503 if exc.code == "PROFILE_UNAVAILABLE" else 409,
+            default_message="Không thể chọn tài khoản Flow phù hợp cho yêu cầu này.",
+            default_action="Kiểm tra extension/profile, quota hoặc upload lại ảnh trên cùng tài khoản.",
+        )
+    return profile_router, route
 
 
 def _wake_worker() -> None:
@@ -333,7 +367,8 @@ async def _resolve_media_id_from_input(
     if image_url and not image_base64:
         image_base64, mime_type = await _fetch_url_as_base64(image_url)
     if image_base64:
-        res = await client.upload_image(
+        profile_router = _ensure_v1_routing_ready(client)
+        res = await profile_router.upload_image(
             image_base64=image_base64,
             mime_type=mime_type or "image/jpeg",
             project_id=project_id,
@@ -473,13 +508,6 @@ async def generate_image(
 ):
     """Generate images directly with Banana Pro / Banana 2 (synchronous 200 OK)."""
     client = get_flow_client()
-    if not getattr(client, "connected", False) and not getattr(client, "list_extensions", lambda: [])():
-        raise_v1_http_error(
-            "Flow extension is not connected",
-            status_code=503,
-            default_message="Chrome extension FlowKit chưa kết nối với backend server.",
-            default_action="Vui lòng mở trình duyệt Chrome có cài extension FlowKit và kiểm tra trạng thái kết nối.",
-        )
 
     header_val = idempotency_header if isinstance(idempotency_header, str) else None
     idempotency_key = _resolve_idempotency_key(header_val, payload.idempotency_key)
@@ -494,8 +522,12 @@ async def generate_image(
     aspect = _normalize_image_aspect(payload.aspect_ratio)
     orientation = "HORIZONTAL" if "LANDSCAPE" in aspect else "VERTICAL"
     model = normalize_image_model(payload.model or "NANO_BANANA_PRO")
-    inst_id = payload.installation_id
-    pid = payload.project_id or ""
+    _, route = await _resolve_v1_route(client, {
+        "installation_id": payload.installation_id,
+        "project_id": payload.project_id or "",
+    })
+    inst_id = route.installation_id
+    pid = route.project_id
 
     ref_media_ids = []
     if payload.input_images:
@@ -595,13 +627,6 @@ async def generate_video(
 ):
     """Generate videos with Omni Flash (asynchronous 200 OK, returns job_id for polling)."""
     client = get_flow_client()
-    if not getattr(client, "connected", False) and not getattr(client, "list_extensions", lambda: [])():
-        raise_v1_http_error(
-            "Flow extension is not connected",
-            status_code=503,
-            default_message="Chrome extension FlowKit chưa kết nối với backend server.",
-            default_action="Vui lòng mở trình duyệt Chrome có cài extension FlowKit và kiểm tra trạng thái kết nối.",
-        )
     header_val = idempotency_header if isinstance(idempotency_header, str) else None
     idempotency_key = _resolve_idempotency_key(header_val, payload.idempotency_key)
     is_ref_based = payload.type in ("reference_to_video", "ingredients", "references", "omni", "r2v")
@@ -620,8 +645,12 @@ async def generate_video(
     duration = payload.duration_seconds
     resolution = getattr(payload, "resolution", "720p") or "720p"
     seed = getattr(payload, "seed", None)
-    inst_id = payload.installation_id
-    pid = payload.project_id or ""
+    _, route = await _resolve_v1_route(client, {
+        "installation_id": payload.installation_id,
+        "project_id": payload.project_id or "",
+    })
+    inst_id = route.installation_id
+    pid = route.project_id
 
     is_t2v = payload.type in ("text_to_video", "t2v", "text")
     start_mid = payload.start_media_id
@@ -838,22 +867,29 @@ async def upscale_image(
     Returns JSON with encodedImage base64 data, or raw binary JPEG if download=True or Accept: image/jpeg.
     """
     client = get_flow_client()
+    _, route = await _resolve_v1_route(client, {
+        "installation_id": payload.installation_id,
+        "project_id": payload.project_id or "",
+        "base_media_id": payload.media_id,
+    })
     media_id = payload.media_id
+    route_inst_id = route.installation_id
+    route_project_id = route.project_id
 
     if not media_id and (payload.image_base64 or payload.image_url):
         media_id, _ = await _resolve_media_id_from_input(
             client,
             image_base64=payload.image_base64,
             image_url=payload.image_url,
-            project_id=payload.project_id or "",
-            preferred_installation=payload.installation_id,
+            project_id=route_project_id,
+            preferred_installation=route_inst_id,
         )
 
     result = await client.upscale_image(
         media_id=media_id,
-        project_id=payload.project_id,
+        project_id=route_project_id,
         resolution=payload.quality,
-        preferred_installation=payload.installation_id,
+        preferred_installation=route_inst_id,
     )
 
     if result.get("error"):
@@ -888,13 +924,7 @@ async def edit_image(
 ):
     """Edit/modify images directly with Banana (synchronous 200 OK)."""
     client = get_flow_client()
-    if not getattr(client, "connected", False) and not getattr(client, "list_extensions", lambda: [])():
-        raise_v1_http_error(
-            "Flow extension is not connected",
-            status_code=503,
-            default_message="Chrome extension FlowKit chưa kết nối với backend server.",
-            default_action="Vui lòng mở trình duyệt Chrome có cài extension FlowKit và kiểm tra trạng thái kết nối.",
-        )
+    _ensure_v1_routing_ready(client)
 
     header_val = idempotency_header if isinstance(idempotency_header, str) else None
     idempotency_key = _resolve_idempotency_key(header_val, payload.idempotency_key)
@@ -909,8 +939,13 @@ async def edit_image(
     aspect = _normalize_image_aspect(payload.aspect_ratio)
     orientation = "HORIZONTAL" if "LANDSCAPE" in aspect else "VERTICAL"
     model = normalize_image_model(payload.model or "NANO_BANANA_PRO")
-    inst_id = payload.installation_id
-    pid = payload.project_id or ""
+    _, route = await _resolve_v1_route(client, {
+        "installation_id": payload.installation_id,
+        "project_id": payload.project_id or "",
+        "base_media_id": payload.base_media_id,
+    })
+    inst_id = route.installation_id
+    pid = route.project_id
 
     base_mid, inst_id = await _resolve_media_id_from_input(
         client,
