@@ -210,6 +210,20 @@ async def clear_hijack_cooldown():
     }
 
 
+@router.post("/reload-extension")
+async def trigger_reload_extension():
+    """Trigger chrome.runtime.reload() in connected extension."""
+    client = get_flow_client()
+    return await client._send("reload_extension", {})
+
+
+@router.post("/refresh-flow-tabs")
+async def trigger_refresh_flow_tabs():
+    """Reload all open Google Flow tabs in connected browser."""
+    client = get_flow_client()
+    return await client._send("refresh_flow_tabs", {})
+
+
 @router.get("/accounts")
 async def list_accounts():
     """List all connected browser profiles/extensions with quota availability."""
