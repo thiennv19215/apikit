@@ -48,7 +48,8 @@ those files; do not replace them wholesale if that would remove Apikit behavior.
 ## Baseline
 
 This policy was established while syncing against
-`crisng95/flowkit@bc051f2308db050b0d987b696c843664d483b515`.
+`crisng95/flowkit@bc051f2308db050b0d987b696c843664d483b515` and updated to
+`crisng95/flowkit@cd9f156 (v1.2.1)` (bypass `extension_hijack_detected` + Trusted Types CSP).
 
 
 ## V1 multi-extension ownership

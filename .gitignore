@@ -29,3 +29,5 @@ pytest_temp/
 .pytest_cache/
 tests_tmp/
 *.zip
+.agent/
+flow_session_project.json

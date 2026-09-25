@@ -1078,6 +1078,19 @@ async def _handle_failure(rid: str, req: dict, result: dict, retry_after: dict =
         logger.error("Request %s FAILED permanently: profile unavailable after 3 retries", rid[:8])
         return
 
+    # [HIJACK] extension_hijack_detected — the captcha bypass failed and the
+    # token was poisoned by x2a. This is a system-level trap, NOT an account
+    # issue. Don't burn retry count — the bypass may succeed on the next
+    # attempt once the tab re-initializes.
+    if "[hijack]" in error_lower or "extension_hijack" in error_lower:
+        await crud.update_request(rid, status="PENDING", error_message=str(error_msg))
+        logger.error(
+            "Request %s [HIJACK] captcha bypass failed — will retry without "
+            "counting (system error, not account error): %s",
+            rid[:8], error_msg,
+        )
+        return
+
     if "public_error_unusual_activity" in error_lower or "unusual activity" in error_lower:
         await crud.update_request(rid, status="FAILED", error_message=str(error_msg))
         await _mark_scene_failed(req)
