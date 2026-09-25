@@ -486,6 +486,15 @@ function connectToAgent() {
         await handleTrpcRequest(msg);
       } else if (msg.method === 'solve_captcha') {
         await handleSolveCaptcha(msg);
+      } else if (msg.method === 'reload_extension') {
+        sendToAgent({ id: msg.id, result: { reloading: true } });
+        setTimeout(() => chrome.runtime.reload(), 200);
+      } else if (msg.method === 'refresh_flow_tabs') {
+        const tabs = await chrome.tabs.query({ url: flowUrls });
+        for (const t of tabs) {
+          if (t?.id) await chrome.tabs.reload(t.id).catch(() => {});
+        }
+        sendToAgent({ id: msg.id, result: { refreshedCount: tabs.length } });
       } else if (msg.method === 'get_status') {
         sendToAgent({
           id: msg.id,
@@ -650,7 +659,7 @@ async function mintCaptchaInPage(tabId, pageAction) {
       target: { tabId },
       world: 'MAIN',
       args: [pageAction, CAPTCHA_SITE_KEY],
-      func: async (action, siteKey) => {
+      func: async (action, defaultSiteKey) => {
         const tailKey = '__flowKitCaptchaMintTail';
         const previous = (
           globalThis[tailKey] instanceof Promise
@@ -660,17 +669,6 @@ async function mintCaptchaInPage(tabId, pageAction) {
         let release;
         globalThis[tailKey] = new Promise((resolve) => { release = resolve; });
         try {
-          // Proactively inject reCAPTCHA Enterprise script if not yet loaded in DOM
-          if (!globalThis.grecaptcha?.enterprise?.execute) {
-            const existing = document.querySelector('script[src*="recaptcha/enterprise.js"]');
-            if (!existing) {
-              const s = document.createElement('script');
-              s.src = `https://www.google.com/recaptcha/enterprise.js?render=${siteKey}`;
-              s.async = true;
-              (document.head || document.documentElement).appendChild(s);
-            }
-          }
-
           const deadline = Date.now() + 22000;
           while (!globalThis.grecaptcha?.enterprise?.execute) {
             if (Date.now() >= deadline) return { error: 'grecaptcha not available' };
@@ -678,11 +676,68 @@ async function mintCaptchaInPage(tabId, pageAction) {
           }
 
           if (typeof globalThis.grecaptcha.enterprise.ready === 'function') {
-            await new Promise((res) => globalThis.grecaptcha.enterprise.ready(res));
+            await new Promise((res) => {
+              let done = false;
+              const fin = () => { if (!done) { done = true; res(); } };
+              try { globalThis.grecaptcha.enterprise.ready(fin); } catch (e) {}
+              setTimeout(fin, 5000);
+            });
           }
 
-          const token = await globalThis.grecaptcha.enterprise.execute(siteKey, { action });
-          return token ? { token } : { error: 'NO_TOKEN' };
+          // Resolve site key from configured clients if available
+          let siteKey = defaultSiteKey;
+          try {
+            const cfg = globalThis.___grecaptcha_cfg || {};
+            const clients = cfg.clients || {};
+            for (const k of Object.keys(clients)) {
+              const c = clients[k];
+              if (c && c.sitekey) { siteKey = c.sitekey; break; }
+            }
+          } catch (e) {}
+
+          // Find existing widget id from grecaptcha_cfg
+          let widgetId = null;
+          try {
+            const cfg = globalThis.___grecaptcha_cfg || {};
+            const clients = cfg.clients || {};
+            for (const [id, c] of Object.entries(clients)) {
+              if (c && (!siteKey || c.sitekey === siteKey)) {
+                widgetId = Number(id);
+                break;
+              }
+            }
+          } catch (e) {}
+
+          if (widgetId === null) {
+            let host = document.getElementById('flowkit-recaptcha-host');
+            if (!host) {
+              host = document.createElement('div');
+              host.id = 'flowkit-recaptcha-host';
+              host.style.cssText = 'position:fixed;left:-9999px;top:0;width:1px;height:1px;';
+              document.documentElement.appendChild(host);
+            }
+            const saved = host.getAttribute('data-widget-id');
+            if (saved !== null && saved !== '') {
+              widgetId = Number(saved);
+            } else if (typeof globalThis.grecaptcha?.enterprise?.render === 'function') {
+              try {
+                widgetId = globalThis.grecaptcha.enterprise.render(host, {
+                  sitekey: siteKey,
+                  size: 'invisible',
+                });
+                host.setAttribute('data-widget-id', String(widgetId));
+              } catch (err) {
+                widgetId = 0;
+              }
+            }
+          }
+
+          const target = widgetId !== null && widgetId !== undefined ? widgetId : siteKey;
+          const token = await Promise.race([
+            globalThis.grecaptcha.enterprise.execute(target, { action }),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('execute_hang')), 10000)),
+          ]);
+          return token ? { token: String(token) } : { error: 'NO_TOKEN' };
         } catch (error) {
           return { error: error?.message || 'CAPTCHA_EXECUTE_FAILED' };
         } finally {

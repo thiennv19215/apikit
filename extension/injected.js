@@ -66,17 +66,44 @@ function waitReady(timeout = 5000) {
   });
 }
 
+let _cachedWidgetId = null;
+
+function findExistingWidgetId(sitekey) {
+  try {
+    const cfg = window.___grecaptcha_cfg || globalThis.___grecaptcha_cfg || {};
+    const clients = cfg.clients || {};
+    for (const [id, c] of Object.entries(clients)) {
+      if (c && (!sitekey || c.sitekey === sitekey)) {
+        return Number(id);
+      }
+    }
+  } catch (e) {}
+  return null;
+}
+
 let _widgetPromise = null;
 function ensureWidget(sitekey) {
+  if (_cachedWidgetId !== null) return Promise.resolve(_cachedWidgetId);
   if (_widgetPromise) return _widgetPromise;
   _widgetPromise = (async () => {
     await waitReady(5000);
+    const existing = findExistingWidgetId(sitekey);
+    if (existing !== null) {
+      _cachedWidgetId = existing;
+      return existing;
+    }
     let host = document.getElementById('flowkit-recaptcha-host');
     if (!host) {
       host = document.createElement('div');
       host.id = 'flowkit-recaptcha-host';
       host.style.cssText = 'position:fixed;left:-9999px;top:0;width:1px;height:1px;';
       document.documentElement.appendChild(host);
+    } else {
+      const savedId = host.getAttribute('data-widget-id');
+      if (savedId !== null && savedId !== '') {
+        _cachedWidgetId = Number(savedId);
+        return _cachedWidgetId;
+      }
     }
     return await new Promise((resolve, reject) => {
       try {
@@ -86,9 +113,18 @@ function ensureWidget(sitekey) {
           callback: () => {},
           'error-callback': (m) => reject(new Error('render_error: ' + m)),
         });
+        host.setAttribute('data-widget-id', String(widgetId));
+        _cachedWidgetId = widgetId;
         resolve(widgetId);
       } catch (e) {
-        reject(new Error('render_threw: ' + (e && e.message || e)));
+        const msg = String(e && e.message || e);
+        if (msg.includes('already been rendered')) {
+          const fallbackId = findExistingWidgetId(sitekey) ?? 0;
+          _cachedWidgetId = fallbackId;
+          resolve(fallbackId);
+        } else {
+          reject(new Error('render_threw: ' + msg));
+        }
       }
     });
   })().catch((e) => { _widgetPromise = null; throw e; });
