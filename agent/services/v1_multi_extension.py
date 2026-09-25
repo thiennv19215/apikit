@@ -14,7 +14,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from agent.config import USE_BATCH_RPC
-from agent.services.execution_audit import media_owner
+from agent.services import execution_audit
+
+
+async def media_owner(media_id: str):
+    """Delegate to execution_audit.media_owner unless monkeypatched on this module."""
+    return await execution_audit.media_owner(media_id)
 
 
 class V1RoutingError(RuntimeError):
@@ -104,6 +109,8 @@ class V1MultiExtensionRouter:
         for media_id in dict.fromkeys(raw_ids):
             owner = await media_owner(media_id)
             if not owner:
+                if inst_id:
+                    continue
                 raise V1RoutingError(
                     "MEDIA_OWNER_UNKNOWN",
                     "upload the original image again before using this UUID",

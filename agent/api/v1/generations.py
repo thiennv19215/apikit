@@ -874,7 +874,7 @@ async def upscale_image(
     })
     media_id = payload.media_id
     route_inst_id = route.installation_id
-    route_project_id = route.project_id
+    route_project_id = route.project_id or None
 
     if not media_id and (payload.image_base64 or payload.image_url):
         media_id, _ = await _resolve_media_id_from_input(
